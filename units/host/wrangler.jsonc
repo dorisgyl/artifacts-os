@@ -1,0 +1,55 @@
+{
+  // U2 -- the task host. One Durable Object and one container per task
+  // (ADR-01). Reached only through the edge; never exposed directly, because
+  // the container runs an agent with full access to its own filesystem.
+  "name": "codex-host",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-15",
+  "workers_dev": false,
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "TASK", "class_name": "TaskHost" },
+      // One index per user. It lives in this Worker rather than the edge so a
+      // task can report to it directly; the edge binds to it by script name.
+      { "name": "INDEX", "class_name": "UserIndex" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TaskHost"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserIndex"] }
+  ],
+
+  "containers": [
+    {
+      "class_name": "TaskHost",
+      // Stock alpine plus a boot script that fetches the pinned codex release.
+      // Nothing is built locally and the deployer needs no Docker; the cost is
+      // ~10s of boot per task and a dependency on the release being reachable.
+      "image": "docker.io/library/alpine:3.20",
+      "instance_type": "basic",
+      // This is the deployment-wide concurrent task ceiling, not a tuning knob:
+      // one task is one container. A finished task must be destroyed explicitly
+      // or it keeps its slot until sleepAfter expires.
+      "max_instances": 4
+    }
+  ],
+
+  // Outbound model traffic. All three are secrets rather than vars: a var
+  // declared here is rewritten on every deploy and would travel with the repo,
+  // which is how one deployment's values end up in every clone.
+  //
+  //   npx wrangler secret put CF_ACCOUNT_ID     --config units/host/wrangler.jsonc
+  //   npx wrangler secret put AI_GATEWAY_TOKEN  --config units/host/wrangler.jsonc
+  //   npx wrangler secret put OPENAI_API_KEY    --config units/host/wrangler.jsonc
+  //
+  // With CF_ACCOUNT_ID and AI_GATEWAY_TOKEN set, model traffic is routed
+  // through AI Gateway and OPENAI_API_KEY is not needed here at all: the
+  // provider key is stored at the gateway, so the container carries a gateway
+  // token instead of spend authority on an OpenAI account.
+  //
+  // AI_GATEWAY_NAME defaults to "default", which AI Gateway creates on first
+  // use. Any other name has to be created first.
+
+  "observability": { "enabled": true }
+}

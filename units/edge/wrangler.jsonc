@@ -1,0 +1,26 @@
+{
+  // U1 -- the edge. The only unit with a route; everything else is reached
+  // through it. Put a hostname you control in front of this and nothing else.
+  "name": "codex-edge",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-15",
+  "workers_dev": true,
+
+  // The task objects live in the host Worker; the edge binds to that namespace
+  // by script name, which is why codex-host must be deployed first.
+  "durable_objects": {
+    "bindings": [
+      { "name": "TASK", "class_name": "TaskHost", "script_name": "codex-host" },
+      { "name": "INDEX", "class_name": "UserIndex", "script_name": "codex-host" }
+    ]
+  },
+
+  // ACCESS_TEAM_DOMAIN and ACCESS_AUD are secrets, not vars: a var of the same
+  // name silently overrides a secret, which is how one deployment's values can
+  // end up pointing every clone at somebody else's Access application.
+  //
+  //   npx wrangler secret put ACCESS_TEAM_DOMAIN --config units/edge/wrangler.jsonc
+  //   npx wrangler secret put ACCESS_AUD         --config units/edge/wrangler.jsonc
+
+  "observability": { "enabled": true }
+}
