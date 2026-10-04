@@ -8,9 +8,10 @@
 //     script from a CDN.
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 function walk(dir) {
   const out = {};
@@ -18,7 +19,7 @@ function walk(dir) {
     for (const name of readdirSync(d).sort()) {
       const p = join(d, name);
       if (statSync(p).isDirectory()) visit(p);
-      else out[relative(dir, p)] = readFileSync(p, "utf8");
+      else out[relative(dir, p).split(sep).join("/")] = readFileSync(p, "utf8");
     }
   };
   visit(dir);

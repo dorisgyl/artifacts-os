@@ -6,12 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-const tplDir = new URL("../templates/tpl-scheduled-scan/", import.meta.url).pathname;
+const tplDir = fileURLToPath(new URL("../templates/tpl-scheduled-scan/", import.meta.url));
 
 function walk(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -19,7 +20,7 @@ function walk(dir: string): Record<string, string> {
     for (const name of readdirSync(d)) {
       const p = join(d, name);
       if (statSync(p).isDirectory()) visit(p);
-      else out[relative(dir, p)] = readFileSync(p, "utf8");
+      else out[relative(dir, p).split(sep).join("/")] = readFileSync(p, "utf8");
     }
   };
   visit(dir);
@@ -90,8 +91,8 @@ async function startDev(): Promise<{ url: string; stop: () => void }> {
     JSON.stringify({ name: "aos-dyn", main: "index.js", compatibility_date: "2026-10-01", worker_loaders: [{ binding: "LOADER" }] }),
   );
   const port = 8800 + Math.floor(Math.random() * 100);
-  const bin = new URL("../node_modules/.bin/wrangler", import.meta.url).pathname;
-  const child = spawn(bin, ["dev", "--port", String(port), "--ip", "127.0.0.1"], { cwd: dir, stdio: "ignore" });
+  const bin = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  const child = spawn(process.execPath, [bin, "dev", "--port", String(port), "--ip", "127.0.0.1"], { cwd: dir, stdio: "ignore" });
   const url = "http://127.0.0.1:" + port;
   for (let i = 0; i < 90; i++) {
     await new Promise((r) => setTimeout(r, 1000));
