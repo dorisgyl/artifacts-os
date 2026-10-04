@@ -155,7 +155,9 @@ function isolate(res: Response): Response {
  */
 export async function serveApp(env: Env, exports: unknown, request: Request, rest: string[]): Promise<Response> {
   const [repo, maybeRef, ...tail] = rest;
-  if (!repo || !(await registry(env).app(repo))) return new Response("no such app\n", { status: 404 });
+  // Registered apps, and templates (a template fix is previewed like any change).
+  const known = !!repo && ((await registry(env).app(repo)) || (repo.startsWith("tpl-") && (await headOf(env, repo, "main").catch(() => null))));
+  if (!known) return new Response("no such app\n", { status: 404 });
   const preview = !!maybeRef && maybeRef.startsWith("@");
   const ref = preview ? urlRef(maybeRef.slice(1)) : "main";
   const sha = /^[0-9a-f]{40}$/.test(ref) ? ref : await headOf(env, repo, ref);

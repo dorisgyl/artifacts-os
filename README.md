@@ -85,6 +85,13 @@ The video calls out anything that is not built. This table is the same list.
 | Email ingestion of statements (statements are uploaded in the Console) | **designed, not built** |
 | Trace notes (`refs/notes/trace/*`) | **designed, not built** |
 
+**Known limit.** App code runs with no network, so a Worker run cannot send
+data anywhere. App *pages* are written by agents too. They are sandboxed into
+an opaque origin with no access to your session or the API, but a page can
+still navigate the browser to another site. The rules review catches the
+straightforward attempts, not every obfuscated one, so treat a report page as
+untrusted content.
+
 The platform facts this design depends on are listed as D1 items. The D1
 worker in `spikes/d1/` checks them against a real account. Until they have
 been run there, treat the items in [CLAUDE.md](CLAUDE.md#d1) as the source of

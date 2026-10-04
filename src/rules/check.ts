@@ -78,6 +78,50 @@ const NETWORK = [
   { re: /['"`]\/\/[A-Za-z0-9-]+\.[A-Za-z]/, what: "a protocol-relative URL" },
 ];
 
+/** Remove JS comments outside string literals, keeping newlines (line numbers). */
+export function stripComments(src: string): string {
+  let out = "";
+  let i = 0;
+  let quote: string | null = null;
+  while (i < src.length) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === "\\") {
+        out += next ?? "";
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
+        if (src[i] === "\n") out += "\n";
+        i++;
+      }
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 function luhn(digits: string): boolean {
   let sum = 0;
   let alt = false;
@@ -141,8 +185,9 @@ export function review(input: {
       case "no-network": {
         for (const c of input.changed) {
           if (!c.content || !isCode(c.path)) continue;
-          // Comments are checked too: "*/ fetch(...)" is code on a comment line.
-          c.content.split("\n").forEach((line, i) => {
+          // Comments are removed first (so they may cite URLs) by a scanner that
+          // knows strings, so "*/ fetch(...)" after a comment is still code.
+          stripComments(c.content).split("\n").forEach((line, i) => {
             for (const n of NETWORK) {
               if (n.re.test(line)) {
                 findings.push({ rule: rule.id, path: c.path, line: i + 1, detail: "network call: " + n.what });

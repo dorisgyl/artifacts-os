@@ -140,3 +140,8 @@ export async function listRepos(env: Env): Promise<{ name: string; description: 
   } while (cursor);
   return out;
 }
+
+/** A Workflow instance id: letters, digits, "-" and "_" only, at most 100. */
+export function workflowId(...parts: string[]): string {
+  return (parts.join("-").replace(/[^A-Za-z0-9_-]/g, "-") + "-" + Date.now().toString(36)).slice(-100).replace(/^[^A-Za-z0-9_]+/, "");
+}

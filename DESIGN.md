@@ -7,6 +7,9 @@
 > - **fork 默认只复制默认分支**（binding 的 `defaultBranchOnly` 默认为 true），所以 notes 是否随 fork 复制由 D1 第 5 项实测。
 > - **审查兜底**：若 push 事件不可用（D1 第 3 项失败），设 `REVIEW_MODE=direct`，agent push 后自行触发审查。
 > - **playbook 合并**：容器写到 `experience` 的 `playbook/*` 分支在审查通过后由运行时自动合并。
+> - **应用页面隔离**：应用页面也是 agent 写的，所以一律以 CSP sandbox（不透明 origin）返回，不带主人的 cookie/Access 头，不能调用 API；审批栏是运行时自己的页面，应用以 iframe 嵌入。页面仍可导航到外站，README 已注明。
+> - **合并只认审过的那个提交**：审批栏提交 sha，审查结论绑定 sha，分支移动后需重新审查。
+> - **容器写 playbook**：容器拿到的是 `experience` 的 fork，push 后由运行时导入、审查，只改 `playbooks/*.json` 才自动合并。
 > - **trace notes** 与 **knowledge 仓库**、**邮件导入**：设计已定，本次未实现，README 的 Built / Designed 表已注明。
 
 2026-10-03 · Samuel（Drlon Software）

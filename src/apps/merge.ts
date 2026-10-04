@@ -10,6 +10,7 @@ import { coordinator, registry } from "../env.ts";
 import { WorkingCopy, RUNTIME, OWNER_VIA_RUNTIME, MergeConflict } from "../git/ops.ts";
 import { writeNotes, type NoteWrite } from "../git/notes.ts";
 import { learnFromMerge } from "../control/memory.ts";
+import { workflowId } from "../lib/artifacts.ts";
 
 export interface MergeResult {
   ok: boolean;
@@ -40,8 +41,10 @@ export async function mergeBranch(
 
   // Only what was reviewed is merged: the lane's last verdict must be a pass,
   // for exactly the commit the owner looked at.
-  const review = lane && (lane.review as { verdict?: string } | null);
-  if (!lane || !review || review.verdict !== "pass") return { ok: false, error: "this branch has not passed review" };
+  const review = lane && (lane.review as { verdict?: string; sha?: string } | null);
+  if (!lane || !review || review.verdict !== "pass" || lane.status !== "passed" || review.sha !== lane.head) {
+    return { ok: false, error: "this version has not passed review" };
+  }
   if (expectedSha && lane.head !== expectedSha) return { ok: false, error: "the branch moved since this version was reviewed" };
   if (["merged", "archived"].includes(lane.status)) return { ok: false, error: "already " + lane.status };
 
@@ -127,13 +130,14 @@ export async function mergeBranch(
     await wc.push(remote, "main");
     await wc.tag(tag, bumped);
     await wc.push(remote, "refs/tags/" + tag);
-    const inst = await env.FAN_OUT.create({ id: repo + "-" + tag + "-" + Date.now().toString(36), params: { template: repo, tag, fixBranch: branch } });
+    const inst = await env.FAN_OUT.create({ id: workflowId(repo, tag), params: { template: repo, tag, fixBranch: branch } });
     result.tag = tag;
     result.fanOut = inst.id;
   }
 
-  // A workspace fork has done its job once its work is merged.
-  if (lane.workspace) {
+  // A container's workspace fork has done its one job once merged. An outside
+  // agent's fork may hold other work: the owner deletes it.
+  if (lane.workspace && lane.kind === "container") {
     const ws = lane.workspace;
     ctx.waitUntil(env.ARTIFACTS.delete(ws).then(() => undefined, () => undefined));
   }

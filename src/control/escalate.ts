@@ -37,10 +37,18 @@ export async function escalateToContainer(
   await waitReady(env, workspace);
   await coord.startLane(input.app, { agent: CONTAINER_AGENT, kind: "container", branch: input.branch, workspace });
 
+  // Playbooks go to a fork of experience too: the container never holds a
+  // token that can move a real repository's main. What it pushes there is
+  // imported as a branch, reviewed, and merged only if it is playbooks alone.
+  const expWorkspace = workspaceName("experience", CONTAINER_AGENT, id);
+  await withRepo(env, "experience", (r) => r.fork(expWorkspace, { description: "container playbook workspace" }));
+  await waitReady(env, expWorkspace);
+  await coordinator(env, "experience").startLane("experience", { agent: CONTAINER_AGENT, kind: "external", workspace: expWorkspace });
+
   // Both tokens are recorded on the app's coordinator and revoked with the lane.
   const remotes = await coord.issue(input.app, CONTAINER_AGENT, [
     { repo: workspace, scope: "write" },
-    { repo: "experience", scope: "write" },
+    { repo: expWorkspace, scope: "write" },
   ], 3600);
   const ws = remotes[workspace];
   await input.wc.push(ws, "refs/heads/" + input.branch, { force: true });
@@ -53,7 +61,7 @@ export async function escalateToContainer(
   );
   // The playbook the container writes goes to experience on a playbook/*
   // branch; it is merged only after review, and only if it touches playbooks.
-  const experience = remotes["experience"];
+  const experience = remotes[expWorkspace];
 
   const taskId = crypto.randomUUID();
   const withCreds = (url: string, token: string) => url.replace("https://", "https://x:" + encodeURIComponent(secretOf(token)) + "@");

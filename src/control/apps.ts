@@ -5,7 +5,7 @@ import type { Env } from "../env.ts";
 import { coordinator, registry } from "../env.ts";
 import { commitToMain, runApp } from "../apps/host.ts";
 import { planChange } from "./planner.ts";
-import { readText } from "../lib/artifacts.ts";
+import { readText, workflowId } from "../lib/artifacts.ts";
 
 const SAFE = /^[A-Za-z0-9._-]{1,80}$/;
 
@@ -100,7 +100,7 @@ export async function requestChange(env: Env, app: string, request: string) {
     // Staggered a little so later agents read earlier agents' claims.
     if (i) await new Promise((r) => setTimeout(r, 2000));
     const inst = await env.AGENT_RUN.create({
-      id: l.repo + "-" + l.agent + "-" + Date.now().toString(36),
+      id: workflowId(l.repo, l.agent),
       params: {
         repo: l.repo,
         agent: l.agent,

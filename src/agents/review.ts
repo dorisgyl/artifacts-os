@@ -67,7 +67,7 @@ export async function reviewRef(env: Env, repo: string, branch: string, sha: str
     lane.agent,
     result.verdict === "pass" ? "passed" : "blocked",
     result.verdict === "pass" ? "rules pass" : result.findings[0]?.detail,
-    { review: toJson(result), head: sha },
+    { review: toJson({ ...result, sha }), head: sha },
   );
   return result;
 }

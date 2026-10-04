@@ -168,6 +168,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       if (superseded.includes(extra.head)) return false;
       superseded.push(cur.head);
       head = extra.head;
+      // A verdict belongs to the commit it was given for; a new head starts unreviewed.
+      if (extra.review === undefined) this.ctx.storage.sql.exec("UPDATE lanes SET review = NULL WHERE agent = ?", agent);
     } else {
       if (extra.head) head = extra.head;
       // Same head (or none): never go backwards, and an agent's late failure

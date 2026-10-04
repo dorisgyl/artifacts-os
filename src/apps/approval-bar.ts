@@ -38,10 +38,10 @@ export async function previewPage(env: Env, repo: string, branch: string, sha: s
   const review = (lane && (lane.review as ReviewResult | null)) || null;
   const decision = lane && (lane.decision as { by?: string; decision?: string; reason?: string } | null);
   // The verdict counts only for the commit it was given for.
-  const reviewed = !!(review && lane && lane.head === sha);
+  const reviewed = !!(review && lane && lane.head === sha && (review as { sha?: string }).sha === sha);
   const passed = reviewed && review!.verdict === "pass";
   const blocked = reviewed && review!.verdict === "reject";
-  const mergeable = passed && !!lane && !["merged", "archived"].includes(lane.status);
+  const mergeable = passed && !!lane && lane.status === "passed";
   const stale = !!(review && lane && lane.head && lane.head !== sha);
 
   const versions = lanes

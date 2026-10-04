@@ -57,7 +57,16 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
     if (ws) {
       const imported = await step.do("import", () => this.importFromWorkspace(repo, ws.app, ws.agent, branch, after));
       if (!imported) return { skipped: "not imported" };
-      const verdict = await this.reviewStep(step, ws.app, imported.branch, after);
+      const isPlaybook = ws.app === "experience";
+      const verdict = await this.reviewStep(step, ws.app, imported.branch, after, isPlaybook);
+      // A playbook from the container joins experience once it passes review
+      // and touches nothing but playbooks.
+      if (isPlaybook && verdict === "pass") {
+        await step.do("merge-playbook", async () => {
+          const r = await mergeBranch(this.env, this.ctx, ws.app, imported.branch, "playbook passed review", after);
+          return { ok: r.ok, error: r.error || null };
+        });
+      }
       return { repo: ws.app, branch: imported.branch, verdict };
     }
 
@@ -65,15 +74,7 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
       return step.do("guard", () => this.guardMain(repo, after));
     }
 
-    const review = await this.reviewStep(step, repo, branch, after, true);
-    // A playbook the container wrote is merged into experience once it passes
-    // review -- and only if it touches nothing but playbooks.
-    if (review === "pass" && repo === "experience" && branch.startsWith("playbook/")) {
-      await step.do("merge-playbook", async () => {
-        const r = await mergeBranch(this.env, this.ctx, repo, branch, "playbook passed review", after);
-        return { ok: r.ok, error: r.error || null };
-      });
-    }
+    const review = await this.reviewStep(step, repo, branch, after);
     return { repo, branch, verdict: review };
   }
 

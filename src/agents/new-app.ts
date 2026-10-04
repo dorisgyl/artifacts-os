@@ -10,7 +10,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env.ts";
 import { coordinator, registry } from "../env.ts";
-import { listRepos, waitReady, withRepo, exists, TEMPLATE_PREFIX } from "../lib/artifacts.ts";
+import { listRepos, waitReady, withRepo, exists, TEMPLATE_PREFIX, workflowId } from "../lib/artifacts.ts";
 import { choose } from "../control/jev.ts";
 import { completeJson } from "./llm.ts";
 import { planNewApp } from "../control/planner.ts";
@@ -139,7 +139,7 @@ export class NewApp extends WorkflowEntrypoint<Env, NewAppParams> {
       await coord.waitFor({ workflow: "NEW_APP", instanceId: event.instanceId, agents: lanes.map((l) => l.agent), until: ["passed", "blocked", "failed"] });
       await env.AGENT_RUN.createBatch(
         lanes.map((l) => ({
-          id: app + "-" + l.agent + "-" + Date.now().toString(36),
+          id: workflowId(app, l.agent),
           params: { repo: app, agent: l.agent, branch: l.branch, task: l.task, allowed: l.allowed, target: l.target },
         })),
       );
@@ -156,7 +156,9 @@ export class NewApp extends WorkflowEntrypoint<Env, NewAppParams> {
         JSON.parse(JSON.stringify(await coordinator(env, app).lanes())) as Lane[],
       );
     }
-    const passed = finished.filter((l) => l && l.status === "passed" && l.head && lanes.some((x) => x.agent === l.agent));
+    const passed = finished.filter(
+      (l) => l && l.status === "passed" && l.head && (l.review as { sha?: string } | null)?.sha === l.head && lanes.some((x) => x.agent === l.agent),
+    );
 
     const merged = await step.do("merge", async () => {
       const coord = coordinator(env, app);
