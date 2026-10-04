@@ -166,7 +166,7 @@ src/git/              isomorphic-git in memory; notes conventions
 src/apps/             Dynamic Worker host, REPO capability, approval bar, merge
 src/rules/check.ts    the rules review
 src/mcp/server.ts     MCP over Streamable HTTP
-src/container/        the codex-cloud container host, changed in two places only
+src/container/        the container task host for long-running agent runs
 templates/            tpl-scheduled-scan, written into Artifacts on first run
 seeds/                rules, memory, experience
 console/              Preact + htm, no build step
