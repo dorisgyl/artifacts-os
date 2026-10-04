@@ -28,7 +28,8 @@ export function parseCron(expr: string) {
     hour: parseField(f[1], 0, 23),
     dom: parseField(f[2], 1, 31),
     month: parseField(f[3], 1, 12),
-    dow: parseField(f[4], 0, 6),
+    // 7 is Sunday too, as in most crons.
+    dow: new Set([...parseField(f[4], 0, 7)].map((d) => d % 7)),
     domAny: f[2] === "*",
     dowAny: f[4] === "*",
   };

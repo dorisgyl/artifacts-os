@@ -13,7 +13,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { Env } from "../env.ts";
 import { coordinator } from "../env.ts";
 import { WorkingCopy, RUNTIME } from "../git/ops.ts";
-import { writeNotes, notesRef } from "../git/notes.ts";
+import { writeNotes, notesRef, parseNotesRef } from "../git/notes.ts";
 import { parseWorkspace, SEED_REPOS } from "../lib/artifacts.ts";
 import { reviewRef } from "./review.ts";
 import { mergeBranch } from "../apps/merge.ts";
@@ -41,21 +41,23 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
     const push = parsePush(event.payload);
     if (!push) return { skipped: "not a push we act on" };
     const { repo, ref, after } = push;
+    const ws = parseWorkspace(repo);
 
-    // Notes and tags are conversation and releases, not changes to review --
-    // and the runtime's own note pushes must not start another review.
+    // An outside agent's notes may arrive in a push of their own, before or
+    // after its branch. Bring over only the refs that agent writes.
+    if (ws && ref.startsWith("refs/notes/")) {
+      return step.do("import-notes", async () => ({ imported: await this.importNotes(repo, ws.app, ws.agent) }));
+    }
+    // Otherwise notes and tags are conversation and releases, not changes to
+    // review -- and the runtime's own note pushes must not start another review.
     if (!ref.startsWith("refs/heads/")) return { skipped: ref };
     const branch = ref.slice("refs/heads/".length);
     if (branch.startsWith("archive/")) return { skipped: "archive" };
 
-    const ws = parseWorkspace(repo);
     if (ws) {
       const imported = await step.do("import", () => this.importFromWorkspace(repo, ws.app, ws.agent, branch, after));
-      if (!imported) return { skipped: "workspace main" };
-      const verdict = await step.do("review", async () => {
-        const r = await reviewRef(this.env, ws.app, imported.branch, after);
-        return r.verdict;
-      });
+      if (!imported) return { skipped: "not imported" };
+      const verdict = await this.reviewStep(step, ws.app, imported.branch, after);
       return { repo: ws.app, branch: imported.branch, verdict };
     }
 
@@ -63,30 +65,76 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
       return step.do("guard", () => this.guardMain(repo, after));
     }
 
-    const verdict = await step.do("review", async () => (await reviewRef(this.env, repo, branch, after)).verdict);
-
+    const review = await this.reviewStep(step, repo, branch, after, true);
     // A playbook the container wrote is merged into experience once it passes
-    // review: experience is the agent's own notebook, not an app to approve.
-    if (verdict === "pass" && repo === "experience" && branch.startsWith("playbook/")) {
+    // review -- and only if it touches nothing but playbooks.
+    if (review === "pass" && repo === "experience" && branch.startsWith("playbook/")) {
       await step.do("merge-playbook", async () => {
-        const r = await mergeBranch(this.env, this.ctx, repo, branch, "playbook passed review");
-        return { ok: r.ok };
+        const r = await mergeBranch(this.env, this.ctx, repo, branch, "playbook passed review", after);
+        return { ok: r.ok, error: r.error || null };
       });
     }
-    return { repo, branch, verdict };
+    return { repo, branch, verdict: review };
+  }
+
+  /** Review, and if it cannot be done, say so on the lane instead of leaving it "reviewing". */
+  private async reviewStep(step: WorkflowStep, repo: string, branch: string, sha: string, playbookCheck = false) {
+    try {
+      return await step.do("review", async () => {
+        const r = await reviewRef(this.env, repo, branch, sha);
+        if (playbookCheck && repo === "experience" && r.paths.some((p) => !/^playbooks\/[A-Za-z0-9._-]+\.json$/.test(p))) {
+          return "reject" as const; // experience changes beyond playbooks need the owner
+        }
+        return r.verdict;
+      });
+    } catch (e) {
+      const lane = await coordinator(this.env, repo).laneByBranch(branch);
+      if (lane) await coordinator(this.env, repo).laneEvent(lane.agent, "failed", "review could not run: " + String((e as Error).message || e).slice(0, 200), { head: sha });
+      throw e;
+    }
+  }
+
+  private async importNotes(workspace: string, app: string, agent: string): Promise<string[]> {
+    const coord = coordinator(this.env, app);
+    const lane = await coord.laneByWorkspace(workspace);
+    const writer = lane ? lane.agent : agent;
+    const remotes = await coord.issue(app, "importer", [
+      { repo: workspace, scope: "read" },
+      { repo: app, scope: "write" },
+    ], 600);
+    const wc = await WorkingCopy.clone(remotes[app], { ref: "main" });
+    const out: string[] = [];
+    for (const r of await wc.listRemoteRefs(remotes[workspace], "refs/notes/")) {
+      const parsed = parseNotesRef(r.ref);
+      // One writer per ref: an agent may only bring back what it wrote. A
+      // fork's copies of the reviewer's, Jev's or the owner's notes stay put.
+      if (!parsed || parsed.writer !== writer || !["intent", "telemetry", "trace"].includes(parsed.kind)) continue;
+      await wc.fetchRef(remotes[workspace], r.ref, r.ref);
+      await wc.push(remotes[app], r.ref, { force: true });
+      out.push(r.ref);
+    }
+    return out;
   }
 
   /**
-   * Copy a branch (and the agent's notes) from a workspace fork into the app
-   * repository. The fork is the outside agent's whole write scope; only the
-   * runtime moves anything from there into the app.
+   * Copy a branch from a workspace fork into the app repository. The fork is
+   * the outside agent's whole write scope; only the runtime moves anything
+   * from there into the app.
    */
   private async importFromWorkspace(workspace: string, app: string, agent: string, branch: string, after: string) {
     if (branch === "main") return null;
     const coord = coordinator(this.env, app);
     const lane = await coord.laneByWorkspace(workspace);
     const agentId = lane ? lane.agent : agent;
-    const target = lane && lane.branch ? lane.branch : "ext/" + agent + "/" + branch;
+    const safe = branch.replace(/[^A-Za-z0-9._/-]/g, "-").replace(/\.\.+/g, ".");
+    let target: string;
+    if (lane && lane.kind === "container") {
+      // The container was given one branch; anything else it pushes is scratch.
+      if (branch !== lane.branch) return null;
+      target = branch;
+    } else {
+      target = "ext/" + agentId + "/" + safe;
+    }
 
     const remotes = await coord.issue(app, "importer", [
       { repo: workspace, scope: "read" },
@@ -95,13 +143,7 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
     const wc = await WorkingCopy.clone(remotes[app], { ref: "main", full: true });
     await wc.fetchRef(remotes[workspace], "refs/heads/" + branch, "refs/heads/" + target, { full: true });
     await wc.push(remotes[app], "refs/heads/" + target, { force: true });
-
-    // The agent's own notes travel with its work. Each ref has one writer, so
-    // overwriting the app's copy of that writer's ref loses nothing.
-    for (const r of await wc.listRemoteRefs(remotes[workspace], "refs/notes/")) {
-      await wc.fetchRef(remotes[workspace], r.ref, r.ref);
-      await wc.push(remotes[app], r.ref, { force: true });
-    }
+    await this.importNotes(workspace, app, agent);
     if (!lane) await coord.startLane(app, { agent: agentId, kind: "external", branch: target, workspace });
     await coord.laneEvent(agentId, "pushed", "from " + workspace + " (" + branch + ")", { head: after, branch: target });
     return { branch: target };
@@ -120,10 +162,14 @@ export class ReviewOnPush extends WorkflowEntrypoint<Env, unknown> {
     const remote = (await coord.issue(repo, "guard", [{ repo, scope: "write" }], 300))[repo];
     const wc = await WorkingCopy.clone(remote, { ref: "main", full: true });
     await wc.fetchRef(remote, "refs/heads/main", "refs/heads/rejected-main");
-    await wc.checkout(expected, { create: "restore" }).catch(async () => {
-      // the expected commit may not be in a fresh clone; fetch it by name
-      await wc.fetchRef(remote, expected, "refs/heads/restore", { full: true });
-    });
+    try {
+      await wc.checkout(expected, { create: "restore" });
+    } catch {
+      // History was rewritten and the expected commit is gone from what the
+      // server advertises. Say so; do not guess.
+      await coord.note("guard", "main moved to " + after.slice(0, 8) + " and the expected " + expected.slice(0, 8) + " is unreachable; restore it by hand");
+      return { repo, main: "unrestorable", expected, rejected: after };
+    }
     await wc.push(remote, "refs/heads/restore", { remoteRef: "refs/heads/main", force: true });
     await wc.push(remote, "refs/heads/rejected-main", { remoteRef: "refs/heads/archive/rejected-main-" + after.slice(0, 8), force: true });
     await writeNotes(

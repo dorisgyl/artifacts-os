@@ -295,6 +295,15 @@ export class WorkingCopy {
   /** Finish a conflicted merge once every conflicted file has been rewritten. */
   async commitMerge(ours: string, theirsOid: string, message: string, author: Author): Promise<string> {
     const oursOid = await this.resolve(ours);
+    // A conflicted merge leaves the worktree as the merge wrote it, but does
+    // not apply deletions: a file theirs deleted (and ours left alone) must go.
+    const base = await this.mergeBase(oursOid, theirsOid);
+    if (base) {
+      const oursChanged = new Set((await this.changed(base, oursOid)).map((c) => c.path));
+      for (const c of await this.changed(base, theirsOid)) {
+        if (c.type === "delete" && !oursChanged.has(c.path)) await this.remove(c.path);
+      }
+    }
     for (const path of await this.files()) {
       await git.add({ ...this.base(), filepath: path });
     }

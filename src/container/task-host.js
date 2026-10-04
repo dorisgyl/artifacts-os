@@ -475,8 +475,9 @@ export class TaskHost extends Container {
           await this.sh(
             "cd /workspace && git add -A && (git diff --cached --quiet || git commit -q -m 'Finish " +
               a.branch.replace(/'/g, "") + " in a container'); " +
+              // Notes first, so they are in the fork when the branch push is imported.
+              "git push -f origin 'refs/notes/intent/*:refs/notes/intent/*' 2>&1 | sed 's#//[^@]*@#//***@#' | tail -1; " +
               "git push -f origin HEAD:refs/heads/" + a.branch + " 2>&1 | sed 's#//[^@]*@#//***@#' | tail -2; " +
-              "git push -f origin 'refs/notes/*:refs/notes/*' 2>&1 | sed 's#//[^@]*@#//***@#' | tail -1; " +
               "git rev-parse HEAD",
           )
         ).trim();

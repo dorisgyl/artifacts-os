@@ -55,10 +55,10 @@ async function api(request: Request, env: Env, ctx: ExecutionContext, path: stri
     return reg(env).fetch(new Request("https://registry/watch", request));
   }
 
-  if (a === "events" && method === "GET") {
+  if ((a === "events" || a === "events.ndjson") && method === "GET") {
     const since = Number(url.searchParams.get("since") || 0);
     const events = await registry(env).events(since, 5000);
-    if (url.pathname.endsWith(".ndjson")) {
+    if (a === "events.ndjson") {
       return new Response(events.map((e) => JSON.stringify(e)).join("\n") + "\n", {
         headers: { "content-type": "application/x-ndjson" },
       });
@@ -104,9 +104,9 @@ async function api(request: Request, env: Env, ctx: ExecutionContext, path: stri
   if (a === "repos" && b && NAME.test(b)) {
     const repo = b;
     if (c === "merge" && method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { branch?: string; reason?: string };
-      if (!body.branch) return json({ error: "branch is required" }, 400);
-      const r = await mergeBranch(env, ctx, repo, body.branch, body.reason || "");
+      const body = (await request.json().catch(() => ({}))) as { branch?: string; sha?: string; reason?: string };
+      if (!body.branch || !body.sha || !/^[0-9a-f]{40}$/.test(body.sha)) return json({ error: "branch and sha are required" }, 400);
+      const r = await mergeBranch(env, ctx, repo, body.branch, String(body.reason || "").slice(0, 500), body.sha);
       return json(r, r.ok ? 200 : 409);
     }
     if (c === "read-token" && method === "POST") {
@@ -151,6 +151,14 @@ export default {
 
     const id = await identify(request, env, ctx);
     if ("error" in id) return json(id, id.error === "not-the-owner" ? 403 : 401);
+
+    // Writes from a browser must come from this origin. App pages are
+    // sandboxed into an opaque origin ("null"), so they cannot call the API
+    // with the owner's credentials. Scripts and MCP clients send no Origin.
+    const origin = request.headers.get("origin");
+    if (request.method !== "GET" && origin && origin !== url.origin) {
+      return json({ error: "cross-origin write refused" }, 403);
+    }
 
     try {
       if (top === "mcp") return await handleMcp(request, env);

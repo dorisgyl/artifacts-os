@@ -11,7 +11,7 @@ import { coordinator, registry } from "../env.ts";
 import { filesAt, type CapabilityProps } from "./capability.ts";
 import { headOf } from "../lib/artifacts.ts";
 import { WorkingCopy, RUNTIME } from "../git/ops.ts";
-import { approvalBar } from "./approval-bar.ts";
+import { previewPage } from "./approval-bar.ts";
 
 export const APP_COMPAT_DATE = "2026-10-01";
 
@@ -129,51 +129,75 @@ async function commitSnapshots(env: Env, repo: string, snapshots: Record<string,
   return commitToMain(env, repo, files, "Run: " + summary);
 }
 
+// App pages are written by agents, so they never run with the owner's origin:
+// every app response is sandboxed into an opaque origin with no network, no
+// forms and no framing outside the runtime. The approval bar lives in a
+// runtime-owned page around the app, never inside it.
+export const APP_CSP =
+  "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+  "img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+
+const FORWARDED = ["accept", "accept-language", "content-type", "user-agent"];
+
+function isolate(res: Response): Response {
+  const out = new Response(res.body, res);
+  out.headers.set("content-security-policy", APP_CSP);
+  out.headers.set("x-content-type-options", "nosniff");
+  out.headers.delete("set-cookie");
+  return out;
+}
+
 /**
- * GET /apps/<repo>/...           -> the live app at main
- * GET /apps/<repo>/@<ref>/...    -> a preview at a branch or sha, with the
- *                                   approval bar on top
+ * GET /apps/<repo>/...            -> the live app at main, sandboxed
+ * GET /apps/<repo>/@<ref>/        -> the preview page: approval bar + the app
+ *                                    pinned at one sha in a sandboxed frame
+ * GET /apps/<repo>/@<sha>/-/...   -> the app itself at that sha, sandboxed
  */
 export async function serveApp(env: Env, exports: unknown, request: Request, rest: string[]): Promise<Response> {
   const [repo, maybeRef, ...tail] = rest;
-  if (!repo) return new Response("no app\n", { status: 404 });
-  const preview = maybeRef && maybeRef.startsWith("@");
+  if (!repo || !(await registry(env).app(repo))) return new Response("no such app\n", { status: 404 });
+  const preview = !!maybeRef && maybeRef.startsWith("@");
   const ref = preview ? urlRef(maybeRef.slice(1)) : "main";
-  const path = "/" + (preview ? tail : [maybeRef, ...tail].filter(Boolean)).join("/");
-
   const sha = /^[0-9a-f]{40}$/.test(ref) ? ref : await headOf(env, repo, ref);
   if (!sha) return new Response("no such branch: " + ref + "\n", { status: 404 });
 
   const url = new URL(request.url);
-  const inner = new Request(new URL(path + url.search, url.origin), { method: request.method, headers: request.headers });
+  const framed = preview && tail[0] === "-";
+  const appPath = "/" + (preview ? (framed ? tail.slice(1) : []) : [maybeRef, ...tail].filter(Boolean)).join("/");
+  const headers = new Headers();
+  for (const h of FORWARDED) {
+    const v = request.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  // The owner's cookies and Access assertion never reach app code.
+  const inner = new Request(new URL(appPath + url.search, url.origin), { method: "GET", headers });
 
   if (!preview) {
     const stub = await loadApp(env, exports, { repo, sha, mode: "live" });
-    return entry(stub).fetch(inner);
+    return isolate(await entry(stub).fetch(inner));
   }
 
   // A preview runs the pipeline on the same statements, shows the result and
   // commits nothing. The run id is per sha, so reloading reuses the result.
   const runId = "preview-" + sha.slice(0, 16);
-  const staged = await coordinator(env, repo).staged(runId);
   let runError: string | null = null;
-  if (!Object.keys(staged).length) {
+  if (!Object.keys(await coordinator(env, repo).staged(runId)).length) {
     try {
       const stub = await loadApp(env, exports, { repo, sha, mode: "preview", runId });
       await entry(stub).run({ mode: "preview" });
     } catch (e) {
-      runError = String((e as Error).message || e);
+      runError = String((e as Error).message || e).slice(0, 500);
     }
   }
-  const stub = await loadApp(env, exports, { repo, sha, mode: "preview", runId });
-  const page = await entry(stub).fetch(inner);
-  if (!(page.headers.get("content-type") || "").includes("text/html")) return page;
-  const bar = await approvalBar(env, repo, ref, sha, runError);
-  return new HTMLRewriter()
-    .on("body", {
-      element(el) {
-        el.prepend(bar, { html: true });
-      },
-    })
-    .transform(page);
+  if (framed) {
+    const stub = await loadApp(env, exports, { repo, sha, mode: "preview", runId });
+    return isolate(await entry(stub).fetch(inner));
+  }
+  const branch = /^[0-9a-f]{40}$/.test(ref) ? (await coordinator(env, repo).laneByHead(sha))?.branch || ref : ref;
+  return new Response(await previewPage(env, repo, branch, sha, runError), {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'",
+    },
+  });
 }

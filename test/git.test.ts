@@ -162,3 +162,26 @@ test("archive: a branch moved under archive/ and deleted in place", async () => 
   );
   assert.equal(refs.find((x) => x.ref.includes("archive"))!.oid, oid);
 });
+
+test("a conflicted merge keeps the other side's deletions", async () => {
+  await seed("app6", { "src/csv.js": "a\n", "src/old.js": "old\n" });
+  const r = remote("app6");
+  const ours = await WorkingCopy.clone(r, { full: true });
+  await ours.write("src/csv.js", "ours\n");
+  await ours.commit("Ours", RUNTIME);
+  await ours.push(r, "main");
+  const t = await WorkingCopy.clone(r, { full: true });
+  await t.checkout((await t.log("main", 50)).at(-1)!.oid, { create: "fix/x" });
+  await t.write("src/csv.js", "theirs\n");
+  await t.remove("src/old.js");
+  const theirs = await t.commit("Theirs: rewrite csv, drop old.js", RUNTIME);
+  await t.push(r, "fix/x");
+
+  const m = await WorkingCopy.clone(r, { full: true, ref: "main" });
+  await m.fetchRef(r, "refs/heads/fix/x", "refs/heads/fix/x", { full: true });
+  await assert.rejects(m.merge("main", "fix/x", "Merge", RUNTIME), (e: unknown) => e instanceof MergeConflict);
+  await m.write("src/csv.js", "both\n");
+  const oid = await m.commitMerge("main", theirs, "Merge (resolved)", RUNTIME);
+  assert.equal(await m.readAt(oid, "src/old.js"), null);
+  assert.equal(await m.readAt(oid, "src/csv.js"), "both\n");
+});

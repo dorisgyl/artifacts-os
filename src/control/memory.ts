@@ -84,9 +84,34 @@ export async function revertMemory(env: Env, sha: string): Promise<string> {
   const parent = target.commit.parent[0];
   if (!parent) throw new Error("cannot revert the first commit");
   for (const c of await mem.changed(parent, sha)) {
-    const old = await mem.readAt(parent, c.path);
-    if (old === null) await mem.remove(c.path);
-    else await mem.write(c.path, old);
+    const before = await mem.readAt(parent, c.path);
+    const after = await mem.readAt(sha, c.path);
+    const now = await mem.read(c.path);
+    const obj = (t: string | null) => {
+      try {
+        const v = t === null ? {} : JSON.parse(t);
+        return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+      } catch {
+        return null;
+      }
+    };
+    const [b, a, n] = [obj(before), obj(after), obj(now)];
+    if (b && a && n) {
+      // Undo only what that commit did, key by key, so what was learned
+      // after it stays learned.
+      for (const k of Object.keys(a)) {
+        if (JSON.stringify(n[k]) !== JSON.stringify(a[k])) continue; // changed again since
+        if (k in b) n[k] = b[k];
+        else delete n[k];
+      }
+      for (const k of Object.keys(b)) if (!(k in a) && !(k in n)) n[k] = b[k];
+      await mem.write(c.path, JSON.stringify(n, null, 2) + "\n");
+    } else if (now === after) {
+      if (before === null) await mem.remove(c.path);
+      else await mem.write(c.path, before);
+    } else {
+      throw new Error(c.path + " has changed since that commit; undo it by hand");
+    }
   }
   const oid = await mem.commit('Revert "' + target.commit.message.trim() + '"', RUNTIME);
   await mem.push(remote, "main");

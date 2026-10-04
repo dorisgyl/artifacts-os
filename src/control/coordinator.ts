@@ -59,7 +59,16 @@ interface Waiter {
   until: LaneStatus[];
 }
 
-const TERMINAL: LaneStatus[] = ["passed", "blocked", "merged", "archived", "done", "failed"];
+// Tokens are revoked only when a lane is really over. A review verdict is not
+// the end: an outside agent fixes a blocked change and pushes again.
+const ENDED: LaneStatus[] = ["merged", "archived", "done", "failed"];
+
+// Lane status only moves forward for the same head; a new head starts over.
+const RANK: Record<LaneStatus, number> = {
+  queued: 0, claimed: 1, started: 2, pushed: 3, reviewing: 4,
+  passed: 5, blocked: 5, failed: 5, merged: 6, archived: 6, done: 6,
+};
+
 
 export class RepoCoordinator extends DurableObject<Env> {
   private repoName: string | null = null;
@@ -71,8 +80,13 @@ export class RepoCoordinator extends DurableObject<Env> {
       sql.exec(
         "CREATE TABLE IF NOT EXISTS lanes (agent TEXT PRIMARY KEY, kind TEXT, branch TEXT, strategy TEXT," +
           "status TEXT, detail TEXT, head TEXT, review TEXT, decision TEXT, startedAt INTEGER, updatedAt INTEGER," +
-          "workspace TEXT)",
+          "workspace TEXT, superseded TEXT)",
       );
+      try {
+        sql.exec("ALTER TABLE lanes ADD COLUMN superseded TEXT");
+      } catch {
+        /* already there */
+      }
       sql.exec(
         "CREATE TABLE IF NOT EXISTS tokens (id TEXT PRIMARY KEY, repo TEXT, scope TEXT, agent TEXT," +
           "expiresAt TEXT, revoked INTEGER DEFAULT 0)",
@@ -123,8 +137,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       "INSERT INTO lanes (agent, kind, branch, strategy, status, startedAt, updatedAt, workspace) " +
         "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?) ON CONFLICT(agent) DO UPDATE SET kind=excluded.kind, " +
-        "branch=excluded.branch, strategy=excluded.strategy, status='queued', detail=NULL, review=NULL, " +
-        "decision=NULL, startedAt=excluded.startedAt, updatedAt=excluded.updatedAt, workspace=excluded.workspace",
+        "branch=excluded.branch, strategy=excluded.strategy, status='queued', detail=NULL, review=NULL, head=NULL, " +
+        "decision=NULL, startedAt=excluded.startedAt, updatedAt=excluded.updatedAt, workspace=excluded.workspace, superseded=NULL",
       lane.agent,
       lane.kind,
       lane.branch || null,
@@ -142,26 +156,44 @@ export class RepoCoordinator extends DurableObject<Env> {
     status: LaneStatus,
     detail?: string,
     extra: { head?: string; review?: Json; decision?: Json; branch?: string } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const cur = this.row(agent);
+    if (!cur) return false;
+    const superseded: string[] = JSON.parse(
+      ((this.ctx.storage.sql.exec("SELECT superseded FROM lanes WHERE agent = ?", agent).one().superseded as string) || "[]"),
+    );
+    let head = cur.head;
+    if (extra.head && cur.head && extra.head !== cur.head) {
+      // A verdict about a commit the agent has since replaced is history.
+      if (superseded.includes(extra.head)) return false;
+      superseded.push(cur.head);
+      head = extra.head;
+    } else {
+      if (extra.head) head = extra.head;
+      // Same head (or none): never go backwards, and an agent's late failure
+      // does not undo a verdict already given.
+      if (RANK[status] < RANK[cur.status]) return false;
+      if (status === "failed" && ["passed", "blocked", "merged", "archived", "done"].includes(cur.status)) return false;
+    }
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "UPDATE lanes SET status = ?, detail = COALESCE(?, detail), head = COALESCE(?, head)," +
-        "review = COALESCE(?, review), decision = COALESCE(?, decision), branch = COALESCE(?, branch), updatedAt = ? " +
-        "WHERE agent = ?",
+      "UPDATE lanes SET status = ?, detail = COALESCE(?, detail), head = ?," +
+        "review = COALESCE(?, review), decision = COALESCE(?, decision), branch = COALESCE(?, branch), updatedAt = ?, " +
+        "superseded = ? WHERE agent = ?",
       status,
       detail ?? null,
-      extra.head ?? null,
+      head,
       extra.review === undefined ? null : JSON.stringify(extra.review),
       extra.decision === undefined ? null : JSON.stringify(extra.decision),
       extra.branch ?? null,
       now,
+      JSON.stringify(superseded.slice(-20)),
       agent,
     );
     await this.publish(agent, "lane", status, detail, extra);
-    if (TERMINAL.includes(status)) {
-      await this.revokeAgent(agent);
-      await this.checkWaiters();
-    }
+    if (ENDED.includes(status)) await this.revokeAgent(agent);
+    await this.checkWaiters();
+    return true;
   }
 
   async lanes(): Promise<Lane[]> {
@@ -174,6 +206,13 @@ export class RepoCoordinator extends DurableObject<Env> {
   async laneByBranch(branch: string): Promise<Lane | null> {
     const r = this.ctx.storage.sql
       .exec("SELECT agent FROM lanes WHERE branch = ? ORDER BY updatedAt DESC LIMIT 1", branch)
+      .toArray()[0];
+    return r ? this.row(r.agent as string) : null;
+  }
+
+  async laneByHead(head: string): Promise<Lane | null> {
+    const r = this.ctx.storage.sql
+      .exec("SELECT agent FROM lanes WHERE head = ? ORDER BY updatedAt DESC LIMIT 1", head)
       .toArray()[0];
     return r ? this.row(r.agent as string) : null;
   }

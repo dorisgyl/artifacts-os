@@ -50,15 +50,15 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
     const env = this.env;
     const coord = coordinator(env, p.repo);
 
-    const remotes = await step.do("tokens", async () => {
-      const r = await coord.issue(p.repo, p.agent, [{ repo: p.repo, scope: "write" }], TTL);
-      return JSON.parse(JSON.stringify(r)) as Record<string, { url: string; token: string }>;
-    });
-    const remote = remotes[p.repo];
+    // Tokens are minted inside the step that uses them and never returned:
+    // step results are stored by the platform, and a token minted once could
+    // expire before a slow run reaches its push.
+    const writeRemote = async () => (await coord.issue(p.repo, p.agent, [{ repo: p.repo, scope: "write" }], TTL))[p.repo];
 
     // Claim: read what the others intend, then say what this agent will do,
     // before doing any of it.
     const claim = await step.do("claim", async () => {
+      const remote = await writeRemote();
       const wc = await WorkingCopy.clone(remote, { ref: "main" });
       const base = await wc.resolve("main");
       const refs = await wc.listRemoteRefs(remote, "refs/notes/intent/");
@@ -103,8 +103,14 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
       return { base, others };
     });
 
+    // Only what the model needs, and small: step results have a size limit and
+    // statements grow every month.
+    const trim = (path: string, text: string) =>
+      path.startsWith("data/statements/") ? text.split("\n").slice(0, 40).join("\n") : text.slice(0, 40000);
     const context = await step.do("read", async () => {
-      const files = await readTreeFiles(env, p.repo, claim.base, (path) => !/\.(pdf|png|jpe?g)$/i.test(path));
+      const all = await readTreeFiles(env, p.repo, claim.base, (path) => !/\.(pdf|png|jpe?g)$/i.test(path) && !path.startsWith("snapshots/"));
+      const files: Record<string, string> = {};
+      for (const [k, v] of Object.entries(all)) files[k] = trim(k, v);
       const memory: Record<string, string> = {};
       for (const m of ["cards.json", "merchant-aliases.json", "preferences.json"]) {
         const t = await readText(env, "memory", "main", m);
@@ -115,7 +121,7 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
         const originSha = await headOf(env, p.origin, "main");
         if (originSha) {
           const originFiles = await readTreeFiles(env, p.origin, originSha, (x) => x.startsWith("data/statements/") && /\.(csv|md)$/.test(x));
-          Object.assign(files, originFiles);
+          for (const [k, v] of Object.entries(originFiles)) files[k] = trim(k, v);
         }
       }
       const system = (await readText(env, "experience", "main", "prompts/edge-agent.md")) || DEFAULT_SYSTEM;
@@ -153,18 +159,25 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Smoke test: run the app with the proposed files, without pushing.
       // Templates are not runnable apps on their own, so they skip this.
       const smoke = await step.do("smoke-" + i, async () => {
-        if (p.target === "template" || !context.files["src/main.js"]) return { ok: true as const };
+        if (p.target === "template" || !context.files["src/main.js"]) return { ok: true as const, sandboxed: false };
         const overlay: Record<string, string> = {};
         for (const f of out.proposal.files) overlay[f.path] = f.content;
         try {
           const r = await runApp(env, this.ctx.exports, p.repo, { sha: claim.base, mode: "smoke", overlay });
-          return { ok: true as const, summary: r.result.summary };
+          return { ok: true as const, sandboxed: false, summary: r.result.summary };
         } catch (e) {
-          return { ok: false as const, error: String((e as Error).message || e).slice(0, 1500) };
+          const error = String((e as Error).message || e).slice(0, 1500);
+          return { ok: false as const, sandboxed: /not permitted to access the internet/i.test(error), error };
         }
       });
       if (smoke.ok) accepted = out;
-      else lastError = smoke.error;
+      else if (smoke.sandboxed) {
+        // The code tried to reach the network and the sandbox stopped it.
+        // Retrying cannot fix a strategy that needs the network; push it so
+        // the rules review rejects it in the open, with a reason in Git.
+        accepted = out;
+        lastError = "blocked by the no-network sandbox";
+      } else lastError = smoke.error;
     }
     if (!accepted) {
       await coord.laneEvent(p.agent, "failed", "smoke test failed twice: " + lastError);
@@ -172,8 +185,12 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
     }
 
     const pushed = await step.do("push", async () => {
-      const wc = await WorkingCopy.clone(remote, { ref: "main" });
-      await wc.checkout(claim.base, { create: p.branch });
+      const remote = await writeRemote();
+      const wc = await WorkingCopy.clone(remote, { ref: "main", depth: 50 });
+      // main may have moved since the claim (an upload, a run, another merge);
+      // agents write whole files in their own paths, so building on the
+      // current main is safe when the claimed base has fallen out of reach.
+      await wc.checkout(claim.base, { create: p.branch }).catch(() => wc.checkout("main", { create: p.branch }));
       for (const f of accepted!.proposal.files) await wc.write(f.path, f.content);
       const head = await wc.commit(accepted!.proposal.commit, agentAuthor(p.agent));
       await wc.push(remote, p.branch, { force: true });
@@ -208,6 +225,7 @@ export class AgentRun extends WorkflowEntrypoint<Env, AgentRunParams> {
               tokensOut: accepted!.tokensOut,
               ms: Date.now() - started,
               attempts,
+              smoke: lastError || "passed",
             },
           },
         ],

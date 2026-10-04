@@ -14,6 +14,7 @@ import { listRepos, waitReady, withRepo, exists, TEMPLATE_PREFIX } from "../lib/
 import { choose } from "../control/jev.ts";
 import { completeJson } from "./llm.ts";
 import { planNewApp } from "../control/planner.ts";
+import { nextRun } from "../lib/cron.ts";
 import { WorkingCopy, RUNTIME, MergeConflict } from "../git/ops.ts";
 import { writeNotes } from "../git/notes.ts";
 import type { Lane } from "../control/coordinator.ts";
@@ -54,17 +55,41 @@ export class NewApp extends WorkflowEntrypoint<Env, NewAppParams> {
           },
           { role: "user", content: need },
         ]);
-        return { name: slug(value.name || "") || "app-" + crypto.randomUUID().slice(0, 6), schedule: value.schedule || null };
+        // A schedule the runtime cannot evaluate falls back to the template's.
+        let schedule: string | null = value.schedule || null;
+        try {
+          if (schedule) nextRun(schedule, Date.now());
+        } catch {
+          schedule = null;
+        }
+        return { name: slug(value.name || "") || "app-" + event.instanceId.slice(0, 6).toLowerCase(), schedule };
       } catch {
-        return { name: "app-" + crypto.randomUUID().slice(0, 6), schedule: null as string | null };
+        return { name: "app-" + event.instanceId.slice(0, 6).toLowerCase(), schedule: null as string | null };
       }
     });
     let app = named.name;
 
     const fork = await step.do("fork", async () => {
-      if (await exists(env, app)) app = app + "-" + crypto.randomUUID().slice(0, 4);
+      // Idempotent: a retry after a successful fork finds its own repo (same
+      // description) and carries on instead of forking again.
+      const description = need.slice(0, 180) + " [" + event.instanceId.slice(0, 8) + "]";
+      const ours = async (name: string) => {
+        if (!(await exists(env, name))) return "free";
+        try {
+          const info = await withRepo(env, name, (r) => r.info());
+          return info.description === description ? "ours" : "taken";
+        } catch (e) {
+          // still forking: the fork this step already started
+          return ((e as { code?: string }).code || "").endsWith("_IN_PROGRESS") ? "ours" : "taken";
+        }
+      };
+      let state = await ours(app);
+      if (state === "taken") {
+        app = app + "-" + event.instanceId.replace(/[^a-z0-9]/gi, "").slice(0, 4).toLowerCase();
+        state = await ours(app);
+      }
       const started = Date.now();
-      await withRepo(env, route.choice, (t) => t.fork(app, { description: need.slice(0, 200) }));
+      if (state === "free") await withRepo(env, route.choice, (t) => t.fork(app, { description }));
       await waitReady(env, app, 120000);
       const ms = Date.now() - started;
       await hub("forked " + route.choice + " → " + app + " in " + ms + " ms", { ms }, "forked");
@@ -121,8 +146,17 @@ export class NewApp extends WorkflowEntrypoint<Env, NewAppParams> {
       return lanes.length;
     });
 
-    const done = await step.waitForEvent<{ lanes: Lane[] }>("lanes", { type: "lanes-done", timeout: "45 minutes" });
-    const passed = done.payload.lanes.filter((l) => l && l.status === "passed");
+    // If an agent never finishes, merge what passed rather than lose the app.
+    let finished: Lane[];
+    try {
+      const done = await step.waitForEvent<{ lanes: Lane[] }>("lanes", { type: "lanes-done", timeout: "45 minutes" });
+      finished = done.payload.lanes;
+    } catch {
+      finished = await step.do("lanes-after-timeout", async () =>
+        JSON.parse(JSON.stringify(await coordinator(env, app).lanes())) as Lane[],
+      );
+    }
+    const passed = finished.filter((l) => l && l.status === "passed" && l.head && lanes.some((x) => x.agent === l.agent));
 
     const merged = await step.do("merge", async () => {
       const coord = coordinator(env, app);
@@ -130,7 +164,8 @@ export class NewApp extends WorkflowEntrypoint<Env, NewAppParams> {
       const wc = await WorkingCopy.clone(remote, { ref: "main", full: true });
       const out: string[] = [];
       for (const l of passed) {
-        await wc.fetchRef(remote, "refs/heads/" + l.branch, "refs/heads/" + l.branch, { full: true });
+        const tip = await wc.fetchRef(remote, "refs/heads/" + l.branch, "refs/heads/" + l.branch, { full: true });
+        if (tip !== l.head) continue; // only what was reviewed
         try {
           const oid = await wc.merge("main", l.branch!, "Merge " + l.branch, RUNTIME);
           out.push(l.branch!);

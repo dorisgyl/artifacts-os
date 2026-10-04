@@ -40,7 +40,7 @@ test("a fuzzy strategy inside agent paths passes", () => {
     rules,
     app,
     changed: [
-      { path: "src/normalize.js", type: "modify", content: "// see https://example.com for the idea\nexport function normalize(t) { return t; }\n" },
+      { path: "src/normalize.js", type: "modify", content: "// token similarity, charge day within three days\nexport function normalize(t) { return t; }\n" },
       { path: "tests/normalize.test.js", type: "add", content: "import { test } from './harness.js';\nimport { readFileSync } from 'node:fs';\n" },
     ],
   });
@@ -60,6 +60,13 @@ test("template code from an agent branch is sent to the template", () => {
   // ...while the same change on a template fix branch is fine
   const t = review({ repo: "tpl-scheduled-scan", branch: "fix/csv-quoted-comma", rules, app, changed: r.findings.map(() => ({ path: "src/csv.js", type: "modify" as const, content: "export const x = 1;\n" })) });
   assert.equal(t.verdict, "pass");
+});
+
+test("comment-line and computed tricks do not hide a network call", () => {
+  for (const content of ["/* x\n*/ await fetch(u)\n", "const f = self['fe' + 'tch'];\n", "const u = '//evil.example/x';\n"]) {
+    const r = review({ repo: "card-watch", branch: "attempt/x", rules, app, changed: [{ path: "src/normalize.js", type: "modify", content }] });
+    assert.equal(r.verdict, "reject", content);
+  }
 });
 
 test("full card numbers are found, masked ones are not", () => {

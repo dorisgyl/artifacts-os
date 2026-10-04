@@ -11,11 +11,16 @@
 
 import type { Env } from "../env.ts";
 import { coordinator } from "../env.ts";
-import { withRepo, waitReady, workspaceName, readText, headOf } from "../lib/artifacts.ts";
+import { withRepo, waitReady, workspaceName, readText } from "../lib/artifacts.ts";
+import { registry } from "../env.ts";
+import { ensureSeeds } from "../control/setup.ts";
 import { secretOf } from "../git/ops.ts";
 import { refSegment } from "../apps/host.ts";
 
 const PROTOCOL = "2025-06-18";
+
+// Lane ids the runtime itself uses; an outside agent may not take them.
+const RESERVED = /^(edge-|attempt-|change-|fix-|merge-|git:|codex-container$|runtime$|rules-auditor$|importer$|guard$|owner$|mirror$|jev$|rules$|planner$|app$)/;
 
 const TOOLS = [
   {
@@ -56,6 +61,7 @@ async function callTool(env: Env, origin: string, name: string, args: Record<str
   if (name === "request_app") {
     const need = String(args.need || "").trim();
     if (!need) throw new Error("need is required");
+    await ensureSeeds(env);
     const inst = await env.NEW_APP.create({ params: { need } });
     return text("Started. Workflow " + inst.id + ". Watch it in the Console: " + origin + "/");
   }
@@ -63,8 +69,10 @@ async function callTool(env: Env, origin: string, name: string, args: Record<str
   if (name === "open_workspace") {
     const app = String(args.app || "");
     const intent = String(args.intent || "").slice(0, 300);
-    const agent = String(args.agent || "claude-code").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 32);
-    if (!(await headOf(env, app, "main"))) throw new Error("no app named " + app);
+    const agent = String(args.agent || "claude-code").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 32).toLowerCase();
+    // Only the owner's apps, and never a name the runtime's own agents use.
+    if (!(await registry(env).app(app))) throw new Error("no app named " + app);
+    if (RESERVED.test(agent)) throw new Error("agent id '" + agent + "' is reserved; pick another");
 
     const id = crypto.randomUUID().replace(/-/g, "").slice(0, 6);
     const ws = workspaceName(app, agent, id);
@@ -94,8 +102,8 @@ async function callTool(env: Env, origin: string, name: string, args: Record<str
         "Before you change anything, claim your direction as a note (other agents read these):",
         "  git notes --ref=refs/notes/intent/" + agent + " add -m '{\"v\":1,\"agent\":\"" + agent + "\",\"status\":\"claimed\",\"direction\":\"" + intent.replace(/'/g, "") + "\",\"to\":\"all\"}' HEAD",
         "",
-        "When done: one-line commit, update your intent note on the new commit (status \"pushed\"), then push both:",
-        "  git push origin <your-branch> && git push -f origin refs/notes/intent/" + agent,
+        "When done: one-line commit, update your intent note on the new commit (status \"pushed\"), then push the note first and the branch second:",
+        "  git push -f origin refs/notes/intent/" + agent + " && git push origin <your-branch>",
         "",
         "The push is reviewed against the owner's rules automatically; the owner previews it in the app and merges.",
         "",

@@ -19,9 +19,15 @@ export async function identify(request: Request, env: Env, ctx: ExecutionContext
 
   if (ctx.access) {
     const who = await ctx.access.getIdentity().catch(() => undefined);
-    // Access let the request through; no user identity means a service token
-    // (Claude Code's MCP connection, for one).
-    id = who && who.email ? { tenant, user: who.email, kind: "human" } : { tenant, user: "svc:access", kind: "service" };
+    if (who && who.email) {
+      id = { tenant, user: who.email, kind: "human" };
+    } else {
+      // No user identity: only a service token (Claude Code's MCP connection,
+      // for one) is acceptable, and it must say so in the assertion Access
+      // attached. Anything else fails closed.
+      const cn = serviceTokenName(request);
+      id = cn ? { tenant, user: "svc:" + cn, kind: "service" } : { error: "access-identity-unavailable" };
+    }
   } else {
     id = (await verifyAccessJwt(request, env)) as Identity | IdentityError;
   }
@@ -33,4 +39,21 @@ export async function identify(request: Request, env: Env, ctx: ExecutionContext
     return { error: "not-the-owner", detail: id.user };
   }
   return id;
+}
+
+/**
+ * The service token's common_name from the Access assertion. Read only when
+ * ctx.access is present -- that is, when Access itself fronted this request
+ * and validated the assertion before the Worker saw it.
+ */
+function serviceTokenName(request: Request): string | null {
+  const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
+  if (!jwt) return null;
+  try {
+    const part = jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(atob(part + "===".slice((part.length + 3) % 4))) as { common_name?: string };
+    return claims.common_name ? String(claims.common_name) : null;
+  } catch {
+    return null;
+  }
 }

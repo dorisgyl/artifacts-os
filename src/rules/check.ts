@@ -40,6 +40,7 @@ export interface ReviewResult {
   verdict: "pass" | "reject";
   findings: Finding[];
   checked: string[];
+  paths: string[];
 }
 
 /** Glob with `*` (one segment) and `**` (any depth). */
@@ -63,12 +64,18 @@ export function branchRole(repo: string, branch: string): "agent" | "template-fi
   return "owner";
 }
 
+// A first layer, not the wall: the sandbox (no network at all) is the wall.
+// These catch the honest attempts and the common spellings of dishonest ones.
 const NETWORK = [
   { re: /\bfetch\s*\(/, what: "fetch()" },
   { re: /\bconnect\s*\(/, what: "connect()" },
-  { re: /new\s+WebSocket\s*\(/, what: "WebSocket" },
-  { re: /XMLHttpRequest/, what: "XMLHttpRequest" },
+  { re: /\bWebSocket\b/, what: "WebSocket" },
+  { re: /XMLHttpRequest|EventSource|sendBeacon/, what: "a browser network API" },
+  { re: /\b(?:globalThis|self|window)\s*\[/, what: "computed global access" },
+  { re: /\bimport\s*\(/, what: "dynamic import" },
+  { re: /\beval\s*\(|\bnew\s+Function\s*\(/, what: "eval" },
   { re: /\bhttps?:\/\/[^\s'"`)]+/, what: "a URL" },
+  { re: /['"`]\/\/[A-Za-z0-9-]+\.[A-Za-z]/, what: "a protocol-relative URL" },
 ];
 
 function luhn(digits: string): boolean {
@@ -134,8 +141,8 @@ export function review(input: {
       case "no-network": {
         for (const c of input.changed) {
           if (!c.content || !isCode(c.path)) continue;
+          // Comments are checked too: "*/ fetch(...)" is code on a comment line.
           c.content.split("\n").forEach((line, i) => {
-            if (/^\s*(\/\/|\*)/.test(line)) return; // comments may cite URLs
             for (const n of NETWORK) {
               if (n.re.test(line)) {
                 findings.push({ rule: rule.id, path: c.path, line: i + 1, detail: "network call: " + n.what });
@@ -188,5 +195,5 @@ export function review(input: {
   }
 
   const blocking = findings.filter((f) => !f.detail.startsWith("unknown check"));
-  return { verdict: blocking.length ? "reject" : "pass", findings, checked };
+  return { verdict: blocking.length ? "reject" : "pass", findings, checked, paths: input.changed.map((c) => c.path) };
 }

@@ -9,6 +9,8 @@
 // Behind Access, set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET (a service
 // token). Agent trace notes are dropped before publishing (refs/notes/trace/*):
 // they hold prompts and outputs, and app repos are private by default.
+// Everything else is published as it is -- including data/statements/. That is
+// fine for the simulated demo data; never mirror a repo with real statements.
 
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";

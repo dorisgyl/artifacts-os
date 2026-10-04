@@ -31,9 +31,15 @@ export class FanOut extends WorkflowEntrypoint<Env, FanOutParams> {
     const results: Record<string, unknown> = {};
     // One step per app: a failure in one never stops the others.
     for (const app of siblings) {
-      results[app] = await step.do("upgrade:" + app, { retries: { limit: 1, delay: "10 seconds" } }, () =>
-        this.upgrade(app, template, tag),
-      );
+      try {
+        results[app] = await step.do("upgrade:" + app, { retries: { limit: 1, delay: "10 seconds" } }, () =>
+          this.upgrade(app, template, tag),
+        );
+      } catch (e) {
+        const error = String((e as Error).message || e).slice(0, 300);
+        results[app] = { app, error };
+        await coordinator(this.env, app).laneEvent("merge-" + tag.replace(/\./g, "-"), "failed", error);
+      }
     }
     return { template, tag, results };
   }
@@ -68,14 +74,27 @@ export class FanOut extends WorkflowEntrypoint<Env, FanOutParams> {
       conflicts = e.files;
     }
 
-    // Keep the app's own name and need when the template's app.json changes.
-    const mergedManifest = JSON.parse((await wc.read("app.json")) || "{}");
-    if (mergedManifest.name !== manifest.name || mergedManifest.need !== manifest.need) {
-      await wc.write("app.json", JSON.stringify({ ...mergedManifest, name: manifest.name, need: manifest.need, gates: manifest.gates }, null, 2) + "\n");
+    // app.json is the template's file with this app's own identity on top:
+    // take the template's version and keep the app's name, need, schedule and
+    // gates. That also settles any conflict in it.
+    let theirsManifest: Record<string, unknown> = {};
+    try {
+      theirsManifest = JSON.parse((await wc.readAt(theirs, "app.json")) || "{}");
+    } catch {
+      /* the template's manifest is unreadable: keep ours */
+      theirsManifest = { ...manifest };
     }
+    const keep = { name: manifest.name, need: manifest.need, schedule: manifest.schedule, gates: manifest.gates };
+    const mergedManifest = { ...theirsManifest, ...keep };
+    const currentText = await wc.read("app.json");
+    const wanted = JSON.stringify(mergedManifest, null, 2) + "\n";
+    if (currentText !== wanted) await wc.write("app.json", wanted);
+    // Whether git left the merge unfinished, even if only app.json conflicted.
+    const mergeConflicted = conflicts.length > 0;
+    conflicts = conflicts.filter((f) => f !== "app.json");
 
     if (!conflicts.length && !gates.length) {
-      await this.finishAndPush(wc, remotes[app], app, agent, branch, theirs, false, null);
+      await this.finishAndPush(wc, remotes[app], app, agent, branch, theirs, mergeConflicted, null);
       return { app, path: "clean" };
     }
 
@@ -90,7 +109,7 @@ export class FanOut extends WorkflowEntrypoint<Env, FanOutParams> {
         container: "Something has to run before this can merge (tests, a build, tools), so it needs a shell.",
       },
     );
-    const decisionNote = {
+    const decisionNote: { v: number; by: string; decision: string; reason: string; probabilities: Record<string, number>; to: string } = {
       v: 1,
       by: decision.by,
       decision: decision.choice,
@@ -101,24 +120,35 @@ export class FanOut extends WorkflowEntrypoint<Env, FanOutParams> {
     await coord.laneEvent(agent, "started", "Jev: " + decision.choice + " (" + Math.round(decision.confidence * 100) + "%)", { decision: toJson(decisionNote) });
 
     if (decision.choice === "edge" && !gates.length) {
+      let resolved = true;
       for (const f of conflicts) {
-        const r = await resolveConflict(env, {
-          path: f,
-          conflicted: (await wc.read(f)) || "",
-          ours: await wc.readAt(oursBefore, f),
-          theirs: await wc.readAt(theirs, f),
-          oursWhy: "the app's own customisation of template code",
-          theirsWhy: "the template fix released as " + tag,
-        });
-        await wc.write(f, r.content);
+        try {
+          const r = await resolveConflict(env, {
+            path: f,
+            conflicted: (await wc.read(f)) || "",
+            ours: await wc.readAt(oursBefore, f),
+            theirs: await wc.readAt(theirs, f),
+            oursWhy: "the app's own customisation of template code",
+            theirsWhy: "the template fix released as " + tag,
+          });
+          await wc.write(f, r.content);
+        } catch (e) {
+          // The edge could not settle it: that is exactly what the container is for.
+          resolved = false;
+          decisionNote.reason += "; edge resolution failed: " + String((e as Error).message || e).slice(0, 120);
+          decisionNote.to = "codex-container";
+          break;
+        }
       }
-      await this.finishAndPush(wc, remotes[app], app, agent, branch, theirs, true, decisionNote);
-      return { app, path: "edge", conflicts };
+      if (resolved) {
+        await this.finishAndPush(wc, remotes[app], app, agent, branch, theirs, true, decisionNote);
+        return { app, path: "edge", conflicts };
+      }
     }
 
     // Container: commit the merge as it stands (markers included, if any) on
     // the upgrade branch and hand it over.
-    await this.commitPending(wc, branch, theirs, conflicts.length > 0, agent, "Merge " + template + " " + tag + (conflicts.length ? " (unresolved)" : ""));
+    await this.commitPending(wc, branch, theirs, mergeConflicted, agent, "Merge " + template + " " + tag + (conflicts.length ? " (unresolved)" : ""));
     await coord.laneEvent(agent, "done", "handed to codex-container");
     const esc = await escalateToContainer(env, {
       app,

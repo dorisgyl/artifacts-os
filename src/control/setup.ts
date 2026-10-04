@@ -7,8 +7,8 @@
 import type { Env } from "../env.ts";
 import { registry } from "../env.ts";
 import { BUNDLE } from "../generated/bundle.ts";
-import { exists } from "../lib/artifacts.ts";
-import { WorkingCopy, RUNTIME } from "../git/ops.ts";
+import { exists, headOf, remoteFor } from "../lib/artifacts.ts";
+import { WorkingCopy, RUNTIME, type Remote } from "../git/ops.ts";
 
 const DESCRIPTIONS: Record<string, string> = {
   rules: "What every agent must respect. Read-only to agents.",
@@ -26,7 +26,15 @@ export async function ensureSeeds(env: Env): Promise<{ created: string[] }> {
     ...Object.entries(BUNDLE.templates).map(([n, f]) => [n, f, true] as [string, Record<string, string>, boolean]),
   ];
   for (const [name, files, isTemplate] of all) {
-    if (await exists(env, name)) continue;
+    // A repo created by an earlier attempt whose first push failed has no
+    // main: fill it in rather than leave a template nobody can fork from.
+    if (await exists(env, name)) {
+      if (await headOf(env, name, "main").catch(() => "unknown")) continue;
+      const remote = await remoteFor(env, name, "write", 300);
+      await seedInto(remote, files, name, isTemplate);
+      created.push(name);
+      continue;
+    }
     let description = DESCRIPTIONS[name] || name;
     if (isTemplate) {
       try {
@@ -42,18 +50,21 @@ export async function ensureSeeds(env: Env): Promise<{ created: string[] }> {
       if ((e as { code?: string }).code === "ALREADY_EXISTS") continue; // another request won the race
       throw e;
     }
-    const remote = { url: repo.remote, token: repo.token };
-    const wc = await WorkingCopy.init("main");
-    for (const [path, content] of Object.entries(files)) await wc.write(path, content);
-    const oid = await wc.commit(isTemplate ? "Template " + name + " v1.0" : "Seed " + name, RUNTIME);
-    await wc.push(remote, "main");
-    if (isTemplate) {
-      await wc.tag("v1.0", oid);
-      await wc.push(remote, "refs/tags/v1.0");
-    }
+    await seedInto({ url: repo.remote, token: repo.token }, files, name, isTemplate);
     created.push(name);
     await registry(env).publish({ at: Date.now(), repo: name, agent: "runtime", kind: "setup", status: "created", detail: description });
   }
   seeded = true;
   return { created };
+}
+
+async function seedInto(remote: Remote, files: Record<string, string>, name: string, isTemplate: boolean) {
+  const wc = await WorkingCopy.init("main");
+  for (const [path, content] of Object.entries(files)) await wc.write(path, content);
+  const oid = await wc.commit(isTemplate ? "Template " + name + " v1.0" : "Seed " + name, RUNTIME);
+  await wc.push(remote, "main");
+  if (isTemplate) {
+    await wc.tag("v1.0", oid);
+    await wc.push(remote, "refs/tags/v1.0");
+  }
 }

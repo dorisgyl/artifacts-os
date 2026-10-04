@@ -8,7 +8,7 @@
 
 import type { Env } from "../env.ts";
 import { coordinator, registry, OWNER, REGISTRY_NAME } from "../env.ts";
-import { withRepo, waitReady, workspaceName, remoteFor } from "../lib/artifacts.ts";
+import { withRepo, waitReady, workspaceName } from "../lib/artifacts.ts";
 import { WorkingCopy, RUNTIME, secretOf } from "../git/ops.ts";
 import { writeNotes } from "../git/notes.ts";
 
@@ -37,7 +37,11 @@ export async function escalateToContainer(
   await waitReady(env, workspace);
   await coord.startLane(input.app, { agent: CONTAINER_AGENT, kind: "container", branch: input.branch, workspace });
 
-  const remotes = await coord.issue(input.app, CONTAINER_AGENT, [{ repo: workspace, scope: "write" }], 3600);
+  // Both tokens are recorded on the app's coordinator and revoked with the lane.
+  const remotes = await coord.issue(input.app, CONTAINER_AGENT, [
+    { repo: workspace, scope: "write" },
+    { repo: "experience", scope: "write" },
+  ], 3600);
   const ws = remotes[workspace];
   await input.wc.push(ws, "refs/heads/" + input.branch, { force: true });
   const head = await input.wc.resolve("refs/heads/" + input.branch);
@@ -47,8 +51,9 @@ export async function escalateToContainer(
     [{ kind: "decision", writer: "jev", oid: head, body: { v: 1, ...input.decision, decision: "escalate to container", to: CONTAINER_AGENT } }],
     RUNTIME,
   );
-  // The playbook the container writes goes to the experience repo on a branch.
-  const experience = await remoteFor(env, "experience", "write", 3600);
+  // The playbook the container writes goes to experience on a playbook/*
+  // branch; it is merged only after review, and only if it touches playbooks.
+  const experience = remotes["experience"];
 
   const taskId = crypto.randomUUID();
   const withCreds = (url: string, token: string) => url.replace("https://", "https://x:" + encodeURIComponent(secretOf(token)) + "@");
@@ -96,8 +101,8 @@ export function containerObjective(input: { app: string; branch: string; gates: 
     "Rules: change only what is needed; no new dependencies; no network calls in app code; card numbers as last four digits only.",
     "When everything passes: commit with a one-line message, then add a note explaining what failed and how you fixed it:",
     "  git notes --ref=refs/notes/intent/codex-container add -f -m '<what you did and why>' HEAD",
-    "Then push the branch and your notes:",
-    "  git push origin HEAD:refs/heads/" + input.branch + " && git push -f origin refs/notes/intent/codex-container",
+    "Then push your notes first, then the branch:",
+    "  git push -f origin refs/notes/intent/codex-container && git push origin HEAD:refs/heads/" + input.branch,
     "Finally, if what you learned would help next time, write it as a playbook: clone \"$EXPERIENCE_GIT_REMOTE\" into /tmp/experience,",
     "add playbooks/<short-id>.json in the same shape as the existing playbooks, commit on a branch named playbook/<short-id>, and push that branch.",
   ]

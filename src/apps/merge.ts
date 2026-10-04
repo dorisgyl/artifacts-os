@@ -19,6 +19,7 @@ export interface MergeResult {
   fanOut?: string;
   conflict?: string[];
   error?: string;
+  warnings?: string[];
 }
 
 function nextVersion(current: string): string {
@@ -32,13 +33,24 @@ export async function mergeBranch(
   repo: string,
   branch: string,
   reason: string,
+  expectedSha?: string,
 ): Promise<MergeResult> {
   const coord = coordinator(env, repo);
+  const lane = await coord.laneByBranch(branch);
+
+  // Only what was reviewed is merged: the lane's last verdict must be a pass,
+  // for exactly the commit the owner looked at.
+  const review = lane && (lane.review as { verdict?: string } | null);
+  if (!lane || !review || review.verdict !== "pass") return { ok: false, error: "this branch has not passed review" };
+  if (expectedSha && lane.head !== expectedSha) return { ok: false, error: "the branch moved since this version was reviewed" };
+  if (["merged", "archived"].includes(lane.status)) return { ok: false, error: "already " + lane.status };
+
   const remote = (await coord.issue(repo, "runtime", [{ repo, scope: "write" }], 600))[repo];
   const wc = await WorkingCopy.clone(remote, { ref: "main", full: true });
   const mainBefore = await wc.resolve("main");
   const theirs = await wc.fetchRef(remote, "refs/heads/" + branch, "refs/heads/" + branch, { full: true });
   if (!theirs) return { ok: false, error: "no such branch " + branch };
+  if (theirs !== lane.head) return { ok: false, error: "the branch moved since it was reviewed; wait for the new review" };
 
   let merged: string;
   try {
@@ -50,53 +62,58 @@ export async function mergeBranch(
   await coord.expectMain(repo, merged);
   await wc.push(remote, "main");
   await registry(env).setMain(repo, merged);
+  await coord.laneEvent(lane.agent, "merged", reason || undefined, { head: theirs });
 
-  const lane = await coord.laneByBranch(branch);
+  // From here on main has moved: bookkeeping failures are reported, never thrown.
+  const warnings: string[] = [];
   const notes: NoteWrite[] = [
-    {
-      kind: "decision",
-      writer: "owner",
-      oid: merged,
-      body: { v: 1, by: "owner", decision: "merge " + branch, reason: reason || "", to: "all" },
-    },
-    {
-      kind: "outcome",
-      writer: "owner",
-      oid: theirs,
-      body: { v: 1, source: "owner", outcome: "merged", detail: reason || "chosen in the approval bar" },
-    },
+    { kind: "decision", writer: "owner", oid: merged, body: { v: 1, by: "owner", decision: "merge " + branch, reason: reason || "", to: "all" } },
+    { kind: "outcome", writer: "owner", oid: theirs, body: { v: 1, source: "owner", outcome: "merged", detail: reason || "chosen in the approval bar" } },
   ];
 
   // The other attempts at the same request lose, and are kept.
   const archived: string[] = [];
-  const group = branch.startsWith("attempt/") ? "attempt/" : null;
-  if (group) {
+  if (branch.startsWith("attempt/")) {
     for (const other of await coord.lanes()) {
-      if (!other.branch || other.branch === branch || !other.branch.startsWith(group)) continue;
+      if (!other.branch || other.branch === branch || !other.branch.startsWith("attempt/")) continue;
       if (["merged", "archived"].includes(other.status)) continue;
-      const oid = await wc.fetchRef(remote, "refs/heads/" + other.branch, "refs/heads/archive/" + other.branch);
-      if (!oid) continue;
-      await wc.push(remote, "refs/heads/archive/" + other.branch);
-      await wc.deleteRemoteRef(remote, "refs/heads/" + other.branch);
-      notes.push({
-        kind: "outcome",
-        writer: "owner",
-        oid,
-        body: {
-          v: 1,
-          source: "owner",
-          outcome: "archived",
-          detail: other.status === "blocked" ? "blocked by rules review" : "not chosen; " + branch + " was merged",
-        },
-      });
-      archived.push(other.branch);
-      await coord.laneEvent(other.agent, "archived", "moved to archive/" + other.branch);
+      try {
+        const oid = await wc.fetchRef(remote, "refs/heads/" + other.branch, "refs/heads/archive/" + other.branch).catch(() => null);
+        if (oid) {
+          const target = "refs/heads/archive/" + other.branch + "-" + oid.slice(0, 7);
+          await wc.fetchRef(remote, "refs/heads/" + other.branch, target);
+          await wc.push(remote, target, { force: true });
+          await wc.deleteRemoteRef(remote, "refs/heads/" + other.branch);
+          notes.push({
+            kind: "outcome",
+            writer: "owner",
+            oid,
+            body: {
+              v: 1,
+              source: "owner",
+              outcome: "archived",
+              detail: other.status === "blocked" ? "blocked by rules review" : "not chosen; " + branch + " was merged",
+            },
+          });
+        }
+        archived.push(other.branch);
+        await coord.laneEvent(other.agent, "archived", oid ? "kept as " + "archive/" + other.branch : "never pushed");
+      } catch (e) {
+        warnings.push("could not archive " + other.branch + ": " + String((e as Error).message || e));
+      }
     }
   }
-  await writeNotes(wc, remote, notes, RUNTIME);
-  if (lane) await coord.laneEvent(lane.agent, "merged", reason || undefined, { head: merged });
+  try {
+    await writeNotes(wc, remote, notes, RUNTIME);
+  } catch (e) {
+    warnings.push("notes not written: " + String((e as Error).message || e));
+  }
 
-  const result: MergeResult = { ok: true, merged, archived };
+  const result: MergeResult = { ok: true, merged, archived, warnings };
+
+  // An upgrade branch moves the app to the new template version.
+  const up = branch.match(/^upgrade\/tpl-(v\d+\.\d+)$/);
+  if (up) await registry(env).setTemplateVersion(repo, up[1]);
 
   // A merged template fix becomes a new template version and fans out.
   if (repo.startsWith("tpl-") && branch.startsWith("fix/")) {
@@ -110,9 +127,15 @@ export async function mergeBranch(
     await wc.push(remote, "main");
     await wc.tag(tag, bumped);
     await wc.push(remote, "refs/tags/" + tag);
-    const inst = await env.FAN_OUT.create({ params: { template: repo, tag, fixBranch: branch } });
+    const inst = await env.FAN_OUT.create({ id: repo + "-" + tag + "-" + Date.now().toString(36), params: { template: repo, tag, fixBranch: branch } });
     result.tag = tag;
     result.fanOut = inst.id;
+  }
+
+  // A workspace fork has done its job once its work is merged.
+  if (lane.workspace) {
+    const ws = lane.workspace;
+    ctx.waitUntil(env.ARTIFACTS.delete(ws).then(() => undefined, () => undefined));
   }
 
   // Merges that taught the agent something about the owner's merchants are

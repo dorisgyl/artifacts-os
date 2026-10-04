@@ -15,7 +15,8 @@ Agents never talk to each other directly. They coordinate through Git:
 - **Branches are the work.** Each agent works on its own branch.
 - **Notes are the conversation.** Claims, reviews, and Jev's decisions are
   written as notes. Each writer has its own ref (`refs/notes/<kind>/<writer>`),
-  so two agents pushing notes at once never collide.
+  so agents writing at the same time do not overwrite each other's notes. When
+  two pushes to the same ref race, the losing push is retried.
 - **Forks are the permission boundary.** An outside agent — Claude Code over
   MCP, or Codex in a container — gets its own fork of the app and a one-hour
   token for that fork, and nothing more.
@@ -72,7 +73,7 @@ The video calls out anything that is not built. This table is the same list.
 | Intent, telemetry, review, decision and outcome notes, one ref per writer | built |
 | Rules review on every push (namespace-wide `cf.artifacts.repo.pushed` → Workflow) | built |
 | Main guard (tokens are per repo, so a stray push to main is put back) | built |
-| Apps as Dynamic Workers per commit, no network, `REPO` capability | built |
+| Apps as Dynamic Workers per commit, no network, `REPO` capability; app pages sandboxed (CSP, opaque origin) | built |
 | Approval bar: previews, version switch, merge, archive of losers | built |
 | Memory writes after a merge, with undo (a revert commit) | built |
 | Template fix → new version tag → fan-out: clean / edge-resolved / container | built |
