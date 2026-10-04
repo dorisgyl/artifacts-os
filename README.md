@@ -180,25 +180,3 @@ fixtures/statements/  simulated statements for the demo
 npm test     # git over real Smart HTTP, rules, planner and cron, and the template as a Dynamic Worker in workerd
 npm run check
 ```
-
-## Where this came from
-
-Artifacts-OS grew out of **codex-cloud**, a host for long-running Codex tasks
-in a Cloudflare container. Those are the first three commits in this
-repository, written in August 2026, before the competition opened on 1
-October.
-
-What carries over from codex-cloud:
-
-- the container host (`src/container/`);
-- Access identity verification (`src/lib/access.js`);
-- the per-user registry and its container meters (`src/control/user-index.ts`).
-
-Everything else was built during the competition.
-
-Codex is OpenAI's open-source agent (Apache-2.0). It is downloaded at
-container boot from its official releases and is not redistributed here.
-
-## License
-
-MIT. Copyright © 2026 Doris Gan (see [LICENSE](LICENSE)). Built by Doris Gan and Samuel.
