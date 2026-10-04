@@ -1,0 +1,35 @@
+{
+  "name": "tpl-scheduled-scan",
+  "description": "Scheduled scan over files the owner uploads (statements, bills): parse every format, normalise, detect what changed, report on a schedule.",
+  "template": {
+    "repo": "tpl-scheduled-scan",
+    "version": "v1.0"
+  },
+  "schedule": "0 9 1 * *",
+  "main": "src/main.js",
+  "templatePaths": [
+    "src/main.js",
+    "src/runtime/**",
+    "src/csv.js",
+    "src/pipeline.js",
+    "src/report-shell.js",
+    "src/types.js",
+    "tests/harness.js",
+    "tests/run.js",
+    "app.json",
+    "AGENTS.md",
+    "package.json"
+  ],
+  "agentPaths": [
+    "src/adapters/**",
+    "src/normalize.js",
+    "src/detect.js",
+    "src/report.js",
+    "tests/*.test.js",
+    "tests/fixtures/**",
+    "config.json"
+  ],
+  "gates": {
+    "beforeMerge": []
+  }
+}

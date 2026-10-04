@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "no-egress",
+      "check": "no-network",
+      "description": "Personal data must not leave. App code makes no network calls; the runtime also runs apps with no network."
+    },
+    {
+      "id": "agent-paths",
+      "check": "agent-paths",
+      "description": "Agents change only the paths app.json lists in agentPaths. Template code changes in the template repository."
+    },
+    {
+      "id": "mask-cards",
+      "check": "no-full-card-numbers",
+      "description": "Card and account numbers are kept as the last four digits only, in code, fixtures, snapshots and notes."
+    },
+    {
+      "id": "no-deps",
+      "check": "no-dependencies",
+      "description": "No npm dependencies and no imports other than relative paths and cloudflare:workers."
+    }
+  ],
+  "budgets": {
+    "edgeAgentAttempts": 2,
+    "containerMinutesPerJob": 30
+  }
+}

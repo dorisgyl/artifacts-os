@@ -1,18 +1,51 @@
 {
-  "name": "codex-cloud",
+  "name": "artifacts-os",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "deploy:host": "wrangler deploy --config units/host/wrangler.jsonc",
-    "deploy:edge": "wrangler deploy --config units/edge/wrangler.jsonc",
-    "deploy": "npm run deploy:host && npm run deploy:edge",
-    "tail:host": "wrangler tail --config units/host/wrangler.jsonc"
+    "build": "node scripts/bundle-assets.mjs",
+    "check": "node scripts/bundle-assets.mjs && tsc -p .",
+    "test": "node scripts/bundle-assets.mjs && node --test \"test/*.test.ts\" && cd templates/tpl-scheduled-scan && node tests/run.js",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "setup": "node scripts/setup.mjs",
+    "mirror": "node scripts/mirror.mjs",
+    "d1": "node spikes/d1/run.mjs",
+    "d1:deploy": "node scripts/bundle-assets.mjs && wrangler deploy -c spikes/d1/wrangler.jsonc"
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.3.7"
+    "@cloudflare/containers": "^0.3.7",
+    "isomorphic-git": "^1.43.0"
   },
   "devDependencies": {
-    "wrangler": "^4.123.0"
+    "@cloudflare/workers-types": "^5.20261004.1",
+    "@types/node": "^22.20.5",
+    "htm": "^3.1.1",
+    "preact": "^10.29.8",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.147.0"
+  },
+  "description": "Artifacts-OS: an edge runtime for personal agents on Cloudflare Workers + Artifacts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CF_ACCOUNT_ID": {
+        "description": "Your Cloudflare account id (for AI Gateway routing)."
+      },
+      "AI_GATEWAY_TOKEN": {
+        "description": "AI Gateway token; provider keys are stored at the gateway."
+      },
+      "OPENAI_API_KEY": {
+        "description": "Optional: only used by Codex in the container when AI Gateway is not configured."
+      },
+      "OWNER_EMAIL": {
+        "description": "Optional: the one identity allowed to use this personal runtime."
+      }
+    }
   }
 }

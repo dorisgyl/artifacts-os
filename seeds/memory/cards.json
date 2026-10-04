@@ -1,0 +1,12 @@
+{
+  "cards": [
+    { "last4": "4417", "issuer": "Maple Card", "kind": "credit", "statementFormat": "csv" },
+    { "last4": "9020", "issuer": "Harbour Visa", "kind": "credit", "statementFormat": "csv" }
+  ],
+  "accounts": [
+    { "last4": "1188", "institution": "Lakeshore Bank", "kind": "chequing", "statementFormat": "pdf" }
+  ],
+  "bills": [
+    { "provider": "Northline Mobile", "statementFormat": "csv" }
+  ]
+}

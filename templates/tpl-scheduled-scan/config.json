@@ -1,0 +1,5 @@
+{
+  "currency": "CAD",
+  "priceIncreaseThreshold": 0.005,
+  "subscriptionHints": ["subscription", "monthly", "premium", "plus", "membership"]
+}

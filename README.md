@@ -1,215 +1,196 @@
-# codex-cloud
+# Artifacts-OS
 
-Long-running [Codex](https://github.com/openai/codex) tasks on Cloudflare — give it
-a goal and a repo, close your laptop.
+An edge runtime for one person's own agent, built on Cloudflare Workers and
+Artifacts.
 
-> **Unofficial.** Not affiliated with OpenAI. This is a third-party host for their
-> open-source coding agent, which is consumed as released binaries and never
-> patched.
+You tell it what you need done, again and again — *"on the 1st of every month,
+scan my credit card statements and find new subscriptions and price
+increases"* — and it forks a template into a new Git repository, sends a few
+agents to work on it at once, reviews what they push against your rules, and
+runs the result on its own schedule. Every task is a repo, and every repo is an
+app you keep.
 
-Deploy it to **your own** Cloudflare account. You bring the account and the OpenAI
-credentials; nothing here asks you to sign up for anything of ours.
+Agents never talk to each other directly. They coordinate through Git:
 
-## What this is, and what it is not
+- **Branches are the work.** Each agent works on its own branch.
+- **Notes are the conversation.** Claims, reviews, and Jev's decisions are
+  written as notes. Each writer has its own ref (`refs/notes/<kind>/<writer>`),
+  so two agents pushing notes at once never collide.
+- **Forks are the permission boundary.** An outside agent — Claude Code over
+  MCP, or Codex in a container — gets its own fork of the app and a one-hour
+  token for that fork, and nothing more.
 
-A task host, not a chat window. You submit an objective and a repository, the agent
-works on it unattended for as long as it takes, and it stops when the goal is met,
-when it is genuinely stuck, or when it runs out of budget. You come back to a branch
-and a recording.
+> Built for Cloudflare's *Build the next Git platform* competition (October 2026).
+> MIT licensed. See [`DESIGN.md`](DESIGN.md) for the full design and the decisions behind it.
 
-**Interactive chat is deliberately absent.** Running an agent in a browser tab that
-talks to a container three network hops away is slower and more expensive than
-running it on your own machine, and it buys nothing: the only thing a cloud host
-actually gives you is *work that continues while you are not there*. Use the CLI
-locally for conversation; use this for the forty-minute job.
+## What happens when you type a sentence
 
-## Status: early, and honest about it
+1. **Route.** Jev (TypeSafe's typed decision model on Workers AI) picks a
+   template. Its probabilities are written to `refs/notes/decision/jev`.
+2. **Fork.** The template is forked into a new repo, `card-watch`.
+3. **Plan.** The template's own `AGENTS.md` declares the lanes, for example
+   *input* and *analysis*. The planner gives each lane to one agent on its own
+   branch.
+4. **Work.** Each edge agent is a Workflow. It clones the repo into memory with
+   isomorphic-git, reads the other agents' intent notes, writes its own claim,
+   asks the model for whole files, smoke-tests them, then pushes its branch and
+   its notes together.
+5. **Review.** Every push in the namespace starts a review Workflow. The review
+   checks the change against the owner's `rules` repository: no network calls,
+   only the agent's own paths, card numbers masked, no dependencies. The
+   verdict becomes a review note.
+6. **Run.** The app is loaded at a commit as a **Dynamic Worker with no
+   network**. Its only door is a `REPO` capability, which reads this repo and
+   the owner's memory and hands results back. A branch is live as soon as it is
+   pushed: a preview is the same loader call with a different sha.
+7. **Approve in the app.** A preview page carries an approval bar showing:
+   - what changed;
+   - what the rules found;
+   - why the change was made;
+   - a switch between the competing versions;
+   - a Merge button.
 
-Verified against a real deployment on 2026-08-21.
+   Losing attempts move to `archive/`, with an outcome note explaining why.
 
-| | |
-|---|---|
-| `codex app-server` running in a Cloudflare container | yes — boots in ~10s, pulled at start from the pinned release |
-| A host Durable Object driving it over a FIFO and a file | yes — survives its own eviction, reattaches by byte offset |
-| Frame log — the notification stream, recorded and replayable | yes |
-| Task lifecycle — dispatch, run, stop, preserve the scene | yes — driven by the upstream goal state machine |
-| Cloudflare Access identity and per-user sharding | code complete, **unverified against a real Access application** |
-| Web UI — dispatch, task list, watch a running task | yes |
-| Metering — concurrency, container seconds, turns per day | yes |
-| A real model turn, through AI Gateway with the key stored at the gateway | yes |
-| **An agent that finishes a piece of work** | **yes** — reads the repo, edits a file, verifies its own diff, reaches `complete` |
-| git out — pushing the branch back | **no** — the branch is created and committed locally, never pushed |
-| Restarting a stopped task with a rewritten objective | yes for the conversation — `thread/resume` accepts the restored rollout and the thread id survives; **no** for the working tree |
+When a fix belongs in shared template code, it goes to the template instead.
+The fix then fans out to every app built from that template, and Jev decides
+how each app gets it:
 
-The first completed task took 41 seconds end to end: boot, clone, one turn, and
-a goal that passed Codex's own completion audit. The agent looked for `rg`,
-found it missing, fell back to `find`, read the file, edited it, and then ran
-`git diff --check` on its own work before declaring done.
+| What the merge finds | What happens |
+| --- | --- |
+| A clean merge | Pushed for preview |
+| A textual conflict | Resolved at the edge by the model |
+| A merge that needs a shell (the app declares `npm test` as a gate) | Escalated to Codex in a container. The container gets its own fork and is destroyed afterwards. |
 
-**Restart is only half-correct until pushing works.** A stopped task keeps its
-rollout, so restarting it brings the conversation back and upstream treats it as
-a fresh judgement. The working tree does not come back: the branch was committed
-inside a container that no longer exists, and without a credential it was never
-pushed anywhere. The agent resumes believing it edited files that are no longer
-there. Codex's own continuation prompt tells it to treat the worktree as
-authoritative and inspect before relying on memory, which softens this, but the
-honest statement is that restart becomes correct when `git push` does.
+## Built, and designed but not built
 
-What is still missing is the last mile: the work is committed to a branch inside
-a container that then goes away. Until `git push` is wired, a finished task
-produces a recording and a diff you can read, not a branch you can merge.
+The video calls out anything that is not built. This table is the same list.
 
-## How a task runs
+| | Status |
+| --- | --- |
+| One-sentence app creation: route, fork, lanes, parallel edge agents, auto-merge on pass | built |
+| Intent, telemetry, review, decision and outcome notes, one ref per writer | built |
+| Rules review on every push (namespace-wide `cf.artifacts.repo.pushed` → Workflow) | built |
+| Main guard (tokens are per repo, so a stray push to main is put back) | built |
+| Apps as Dynamic Workers per commit, no network, `REPO` capability | built |
+| Approval bar: previews, version switch, merge, archive of losers | built |
+| Memory writes after a merge, with undo (a revert commit) | built |
+| Template fix → new version tag → fan-out: clean / edge-resolved / container | built |
+| Codex in a container: workspace fork, `npm test`, push back, playbook to `experience` | built |
+| MCP: `request_app`, `open_workspace`, `status` | built |
+| Console: lanes, Jev probabilities, meters, memory, event export | built |
+| Mirror to a public Git remote with notes (`npm run mirror`) | built |
+| `knowledge` repository (reference material the agent consults) | **designed, not built** |
+| Email ingestion of statements (statements are uploaded in the Console) | **designed, not built** |
+| Trace notes (`refs/notes/trace/*`) | **designed, not built** |
 
-```
-browser / API
-     │  HTTPS, behind Cloudflare Access
-     ▼
-edge Worker                  V8 isolate — identity, routing, metering
-     │
-     ▼
-host Durable Object          one per task; frame log, rollout, lifecycle
-     │  ctx.container.exec(["codex","app-server","--stdio"])
-     ▼
-container                    a VM running our image, alive only while the task is
-     └─ codex app-server     the agent loop, plus git and the toolchain
-```
-
-One task means one Durable Object, one container, one `codex` thread. Tasks never
-share a filesystem: two jobs against the same repository get two checkouts, because
-the alternative is two agents silently overwriting each other's edits.
-
-The container exists only while the task runs. There is no idle state to pay for and
-no warm pool to keep alive.
-
-## How a task stops
-
-The stop semantics are Codex's own, not something invented here. A task's state *is*
-its goal state:
-
-| | set by | resumable |
-|---|---|---|
-| `complete` | the model, after an evidence-by-evidence completion audit | terminal |
-| `blocked` | the model, only after the same blocker recurs for three consecutive goal turns | **yes** |
-| `budget_limited` | the system, when the token budget is spent | terminal |
-| `usage_limited` | the system, on an account limit | yes |
-| `paused` | **you** | yes |
-| `active` | | |
-
-Upstream enforces the division: the model may only ever mark a goal `complete` or
-`blocked`, and it is explicitly forbidden from declaring completion because the
-budget is running out. Pausing is yours alone.
-
-There is no "it went the wrong way" state, because only a person can judge that. That
-judgement is expressed by pausing the task, rewriting the objective, and restarting —
-which keeps the work already done, and which upstream treats as a fresh judgement:
-a resumed goal starts its blocked audit over from zero.
-
-**Every task requires a token budget.** `budget_limited` is the only hard brake a
-long-running agent has. A task with no budget is bounded by nothing but your OpenAI
-bill.
-
-**A blocked task is never retried automatically.** Reaching `blocked` already means
-the same obstacle survived three consecutive turns of trying; retrying it in a loop
-converts a careful judgement into an expensive one.
-
-## What survives
-
-| Kept, in the Durable Object | Gone, with the container |
-|---|---|
-| the dispatch — repo, branch, objective, budget | `/workspace`, the working copy |
-| the frame log | the agent process and its memory |
-| the rollout, so a blocked task can resume | background processes it started |
-| the goal snapshot | |
-
-Code persists in **git**, not here: a task clones at start and commits to its working
-branch before stopping. Anything uncommitted when the container goes away is gone,
-so a long task should commit at milestones rather than saving it all for the end.
-
-Stopping is therefore never just "stop the container" — the working tree is committed
-and pushed, the rollout and goal snapshot are written, and only then does the
-container go away. None of that can be reconstructed afterwards.
+The platform facts this design depends on are listed as D1 items. The D1
+worker in `spikes/d1/` checks them against a real account. Until they have
+been run there, treat the items in [CLAUDE.md](CLAUDE.md#d1) as the source of
+truth for what is verified and what is not.
 
 ## Deploy
 
-Two Workers, in dependency order. The edge binds to the host's Durable Object
-namespace by script name, so the host has to exist first.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dorisgyl/artifacts-os)
 
-```bash
-git clone <this repo> && cd codex-cloud
+**Requirements:**
+
+- A Workers Paid plan. Artifacts, Dynamic Workers and Containers all need it.
+- Node 22.18 or newer.
+
+**Steps:**
+
+```sh
 npm install
-
-npm run deploy:host   # the task objects and their containers; no route
-npm run deploy:edge   # the only unit reachable from the internet
+npx wrangler login
+npm run setup      # deploys, asks for secrets, explains Access and MCP
 ```
 
-Put a hostname you control in front of `codex-edge` and put nothing in front of
-`codex-host` — it runs an agent with unrestricted access to its own container.
+The deploy button has not yet been verified for this Worker's binding set
+(D1 item 10). `npm run setup` is the supported path.
 
-Until Access is configured the deployment refuses every request with
-`503 access-not-configured`, including the UI. That is deliberate: an agent with
-a shell, reachable by anyone who finds the URL, is worse than an outage.
+The first visit to the Console creates `rules`, `memory`, `experience` and
+`tpl-scheduled-scan` in your Artifacts namespace.
 
-```bash
-npx wrangler secret put ACCESS_TEAM_DOMAIN --config units/edge/wrangler.jsonc
-npx wrangler secret put ACCESS_AUD         --config units/edge/wrangler.jsonc
+**Configuration:**
+
+- `MODEL` in `wrangler.jsonc` chooses the edge agents' model, served through AI
+  Gateway's compatible endpoint. Provider keys stay at the gateway.
+- If `MODEL` is not set, `FALLBACK_MODEL` runs on Workers AI.
+
+**Access:** put Cloudflare Access in front of the Worker. In the dashboard, open
+Settings → Domains & Routes and enable Cloudflare Access. This covers
+workers.dev and every preview URL.
+
+**Claude Code:** connect it over MCP with an Access service token. See
+`npm run setup`, step 5.
+
+## Try it
+
+1. Open the Console and type a need.
+2. Upload the simulated statements in `fixtures/statements/`, then press
+   **Run now**.
+3. Ask for a change, for example *"Streamly's price went up but the report
+   missed it"*. The `merchant-normalization` playbook in `experience` turns that
+   into three competing attempts:
+   - The `enrich` attempt is rejected for calling out to the network.
+   - Preview the other two and merge one.
+4. Upload `maple-2026-11.csv`. The quoted comma in `"ACME, INC."` breaks the
+   template's CSV reader. Ask for that to be fixed: it is fixed in the
+   template, and the fix fans out to every app built from it.
+
+## Read the agents' notes yourself
+
+```sh
+git clone <mirror> card-watch && cd card-watch
+git fetch origin 'refs/notes/*:refs/notes/*'
+git log --notes='refs/notes/*'
 ```
 
-Both are **secrets, not vars**: a var of the same name silently overrides a
-secret, so one deployment's values baked into the config would point every clone
-at somebody else's Access application.
+## Layout
 
-### Uninstall
-
-`wrangler delete` leaves the container applications behind, still billable.
-They have to go separately:
-
-```bash
-npx wrangler containers list
-npx wrangler containers delete <id>
+```
+wrangler.jsonc        one Worker: every binding, the cron, the push trigger
+src/index.ts          routes: / (Console) /api /apps /mcp; scheduled()
+src/control/          coordinator DO, registry DO, planner, Jev, memory, escalation, setup
+src/agents/           AgentRun, ReviewOnPush, NewApp, FanOut workflows; edge agent; LLM
+src/git/              isomorphic-git in memory; notes conventions
+src/apps/             Dynamic Worker host, REPO capability, approval bar, merge
+src/rules/check.ts    the rules review
+src/mcp/server.ts     MCP over Streamable HTTP
+src/container/        the codex-cloud container host, changed in two places only
+templates/            tpl-scheduled-scan, written into Artifacts on first run
+seeds/                rules, memory, experience
+console/              Preact + htm, no build step
+spikes/d1/            the D1 verification worker
+fixtures/statements/  simulated statements for the demo
 ```
 
-## Requirements
+## Tests
 
-- **OpenAI credentials.** Codex removed the `chat` wire API; only the Responses API
-  is supported, so an arbitrary "OpenAI-compatible" endpoint will not work.
+```sh
+npm test     # git over real Smart HTTP, rules, planner and cron, and the template as a Dynamic Worker in workerd
+npm run check
+```
 
-  The recommended shape is **AI Gateway with the provider key stored at the
-  gateway**. Then the container carries a gateway token instead of an OpenAI
-  key: the agent can still read whatever is in its own container, but what it
-  can read is scoped to one gateway and revocable on its own, rather than being
-  spend authority on an OpenAI account. Set `CF_ACCOUNT_ID` and
-  `AI_GATEWAY_TOKEN` on the host and the routing follows automatically.
+## Where this came from
 
-  Without those two, set `OPENAI_API_KEY` instead and traffic goes straight to
-  OpenAI — simpler, and the key is in the container.
-- **A Cloudflare account on the Workers Paid plan** ($5/month), with Containers.
-- **Cloudflare Access**, for identity. Every Durable Object name is derived from
-  verified Access claims, so a client cannot address another user's task.
-- **A hostname you control.** Do not deploy on `*.workers.dev`.
-- A container image — either built from the `Dockerfile` here, or the published one
-  pulled straight from a public registry, which needs no Docker on your side.
+Artifacts-OS grew out of **codex-cloud**, a host for long-running Codex tasks
+in a Cloudflare container. Those are the first three commits in this
+repository, written in August 2026, before the competition opened on 1
+October.
 
-## Cost
+What carries over from codex-cloud:
 
-Containers bill for provisioned memory and disk **for as long as they run**, whether
-or not the agent is doing anything, and CPU on top of that for actual use. A
-`standard-1` instance (½ vCPU, 4 GiB, 8 GB) costs roughly **$0.038 per hour** idle-
-but-running, and the Workers Paid plan includes 25 GiB-hours per month — about
-**6¼ container-hours** at that size.
+- the container host (`src/container/`);
+- Access identity verification (`src/lib/access.js`);
+- the per-user registry and its container meters (`src/control/user-index.ts`).
 
-This is the reason there is no chat mode. A conversation spends most of its wall
-clock waiting for a human to read and type, and a container billed through that wait
-is paying for nothing. A task keeps the container busy from start to finish.
+Everything else was built during the competition.
 
-Cold start is 1–3 seconds, and a clone on top of that; amortised over a long task it
-does not matter, which it would not be in a chat.
+Codex is OpenAI's open-source agent (Apache-2.0). It is downloaded at
+container boot from its official releases and is not redistributed here.
 
-## Design notes
+## License
 
-`docs/adr/` records the decisions and, more usefully, the rejected alternatives.
-`CONTEXT.md` is the glossary — both are working documents and are not published.
-
-## Licence
-
-MIT. See `LICENSE`. Codex itself is Apache-2.0 and is not redistributed here.
+MIT. Copyright © 2026 Doris Gan (see [LICENSE](LICENSE)). Built by Doris Gan and Samuel.

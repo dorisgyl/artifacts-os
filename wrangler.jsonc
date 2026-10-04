@@ -1,0 +1,96 @@
+{
+  // Artifacts-OS: one Worker. Everything stateful lives in Artifacts; this
+  // Worker routes, coordinates and decides. A container exists only while Jev
+  // says a job needs a shell.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "artifacts-os",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // isomorphic-git reaches for Buffer and a few node built-ins.
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+
+  // Seeds, the template and the Console's vendored libraries are bundled from
+  // plain files at build time, so the repository stays readable and the deploy
+  // button needs nothing beyond `npm install`.
+  "build": { "command": "node scripts/bundle-assets.mjs" },
+
+  "vars": {
+    // The Artifacts namespace below must match this; it is repeated because a
+    // binding cannot be read back by name at runtime.
+    "ARTIFACTS_NAMESPACE": "artifacts-os",
+    // Model used by edge agents. Through AI Gateway when CF_ACCOUNT_ID and
+    // AI_GATEWAY_TOKEN are set (compat endpoint, provider/model naming);
+    // otherwise FALLBACK_MODEL runs on Workers AI directly.
+    "MODEL": "",
+    "FALLBACK_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "AI_GATEWAY_NAME": "default"
+  },
+
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "artifacts-os" }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "ai": { "binding": "AI" },
+
+  "assets": {
+    "directory": "console",
+    "binding": "ASSETS",
+    // The Worker decides what is public: the Console shell is static, but
+    // /api, /apps and /mcp all need identity first.
+    "run_worker_first": true
+  },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "COORD", "class_name": "RepoCoordinator" },
+      { "name": "INDEX", "class_name": "UserIndex" },
+      { "name": "TASK", "class_name": "TaskHost" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TaskHost"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserIndex"] },
+    { "tag": "v3", "new_sqlite_classes": ["RepoCoordinator"] }
+  ],
+
+  "workflows": [
+    { "binding": "AGENT_RUN", "name": "agent-run", "class_name": "AgentRun" },
+    { "binding": "REVIEW", "name": "review-on-push", "class_name": "ReviewOnPush" },
+    { "binding": "NEW_APP", "name": "new-app", "class_name": "NewApp" },
+    { "binding": "FAN_OUT", "name": "fan-out", "class_name": "FanOut" }
+  ],
+
+  "containers": [
+    {
+      "class_name": "TaskHost",
+      // Stock alpine plus a boot script; nothing is built and the deployer
+      // needs no Docker. Node is added at boot for `npm test` (see boot.js).
+      "image": "docker.io/library/alpine:3.20",
+      "instance_type": "basic",
+      "max_instances": 4
+    }
+  ],
+
+  "triggers": {
+    // Hourly: the runtime asks the registry which apps are due and calls their
+    // run(). Dynamic Workers have no scheduled() of their own.
+    "crons": ["17 * * * *"],
+    // Every push to any repo in the namespace -- agent branches, workspace
+    // forks, Claude Code over plain git, the container -- starts a review.
+    "events": [
+      {
+        "type": "cf.artifacts.repo.pushed",
+        "filter": { "namespace": "artifacts-os" },
+        "targets": [{ "type": "workflow", "workflow_name": "review-on-push" }]
+      }
+    ]
+  },
+
+  // Secrets (never vars -- a var silently overrides a secret of the same name):
+  //   CF_ACCOUNT_ID, AI_GATEWAY_TOKEN   model traffic through AI Gateway
+  //   OPENAI_API_KEY                    only for Codex in the container, direct path
+  //   ACCESS_TEAM_DOMAIN, ACCESS_AUD    JWT fallback when ctx.access is absent
+  //   OWNER_EMAIL                       optional: only this identity may use the runtime
+  // `npm run setup` walks through them.
+
+  "observability": { "enabled": true }
+}

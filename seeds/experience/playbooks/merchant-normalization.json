@@ -1,0 +1,25 @@
+{
+  "id": "merchant-normalization",
+  "title": "Merchant names that drift between statements",
+  "when": "The same merchant appears under several descriptors, so a recurring charge looks like a new one or a price change is missed.",
+  "strategies": [
+    {
+      "id": "rules",
+      "branch": "attempt/rules",
+      "summary": "Deterministic cleanup: strip payment-processor prefixes (e.g. 'TBX*', 'SQ *'), phone numbers, store and reference numbers; collapse whitespace; compare the remaining brand token.",
+      "risk": "Misses renamed brands and abbreviations."
+    },
+    {
+      "id": "fuzzy",
+      "branch": "attempt/fuzzy",
+      "summary": "Token similarity plus charge history: treat two descriptors as one merchant when they share a distinctive token and charge within three days of the same day of month for a similar amount.",
+      "risk": "Could merge two unrelated merchants with similar names and amounts."
+    },
+    {
+      "id": "enrich",
+      "branch": "attempt/enrich",
+      "summary": "Look each raw descriptor up in an external merchant-information service and use the canonical name it returns.",
+      "risk": "Sends merchant descriptors, and with them spending patterns, to a third party."
+    }
+  ]
+}

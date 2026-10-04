@@ -1,0 +1,7 @@
+{
+  "name": "scheduled-scan-app",
+  "private": true,
+  "type": "module",
+  "description": "A personal app forked from tpl-scheduled-scan. No dependencies, by contract.",
+  "scripts": { "test": "node tests/run.js" }
+}

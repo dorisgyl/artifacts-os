@@ -56,3 +56,7 @@ build/
 # Local Access service token, never committed
 .access-token
 .dev.vars
+
+# Generated at build time
+src/generated/
+console/vendor/

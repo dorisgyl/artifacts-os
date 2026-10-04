@@ -1,0 +1,24 @@
+{
+  // D1 verification worker. Its own namespace, so nothing it creates touches
+  // the runtime's repositories. Delete the Worker and run /d1/cleanup after.
+  "name": "artifacts-os-d1",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "artifacts-os-d1" }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "ai": { "binding": "AI" },
+  "durable_objects": { "bindings": [{ "name": "LOG", "class_name": "EventLog" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EventLog"] }],
+  "workflows": [{ "binding": "ON_PUSH", "name": "d1-on-push", "class_name": "OnPush" }],
+  "triggers": {
+    "events": [
+      {
+        "type": "cf.artifacts.repo.pushed",
+        "filter": { "namespace": "artifacts-os-d1" },
+        "targets": [{ "type": "workflow", "workflow_name": "d1-on-push" }]
+      }
+    ]
+  }
+}
